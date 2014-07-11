@@ -304,6 +304,15 @@ OPTIONS
     executed will not be changed. This is useful if you want to monitor the
     output of the command being executed, but not see the output from trace-cmd.
 
+*--virt*::
+    This option is usded on a guest in a virtualization environment. If a host
+    is running "trace-cmd virt-server", this option is used to have the data
+    sent to the host with virtio-serial like *-N* option. (see also
+    trace-cmd-virt-server(1))
+
+    Note: This option is not supported with latency tracer plugins:
+      wakeup, wakeup_rt, irqsoff, preemptoff and preemptirqsoff
+
 EXAMPLES
 --------
 
@@ -404,6 +413,7 @@ SEE ALSO
 trace-cmd(1), trace-cmd-report(1), trace-cmd-start(1), trace-cmd-stop(1),
 trace-cmd-extract(1), trace-cmd-reset(1), trace-cmd-split(1),
 trace-cmd-list(1), trace-cmd-listen(1), trace-cmd-profile(1)
+trace-cmd-virt-server(1)
 
 AUTHOR
 ------

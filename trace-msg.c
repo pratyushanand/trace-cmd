@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <linux/types.h>
 
@@ -72,6 +73,7 @@ int cpu_count;
 static int psfd;
 unsigned int page_size;
 int *client_ports;
+int *virt_sfds;
 bool send_metadata;
 
 /* for server */
@@ -242,6 +244,29 @@ static int make_rinit(struct tracecmd_msg *msg)
 	return 0;
 }
 
+static int make_error_msg(struct tracecmd_msg *msg)
+{
+	msg->data.err.size = errmsg->size;
+	msg->data.err.cmd = errmsg->cmd;
+
+	switch (ntohl(errmsg->cmd)) {
+	case MSG_TINIT:
+		msg->data.err.data.tinit = errmsg->data.tinit;
+		break;
+	case MSG_RINIT:
+		msg->data.err.data.rinit = errmsg->data.rinit;
+		break;
+	case MSG_SENDMETA:
+	case MSG_RCONNECT:
+		msg->data.err.data.data = errmsg->data.data;
+		break;
+	}
+
+	msg->size = htonl(sizeof(*msg));
+
+	return 0;
+}
+
 static int tracecmd_msg_create(u32 cmd, struct tracecmd_msg *msg)
 {
 	int ret = 0;
@@ -250,12 +275,15 @@ static int tracecmd_msg_create(u32 cmd, struct tracecmd_msg *msg)
 	msg->cmd = htonl(cmd);
 
 	switch (cmd) {
+	case MSG_ERROR:
+		return make_error_msg(msg);
 	case MSG_RCONNECT:
 		return make_data(CONNECTION_MSG, CONNECTION_MSGSIZE, msg);
 	case MSG_TINIT:
 		return make_tinit(msg);
 	case MSG_RINIT:
 		return make_rinit(msg);
+	case MSG_TCONNECT:
 	case MSG_CLOSE:
 	case MSG_SENDMETA: /* meta data is not stored here. */
 	case MSG_FINMETA:
@@ -304,6 +332,12 @@ static int tracecmd_msg_send(int fd, u32 cmd)
 	msg_free(&msg);
 
 	return ret;
+}
+
+static void tracecmd_msg_send_error(int fd, struct tracecmd_msg *msg)
+{
+	errmsg = msg;
+	tracecmd_msg_send(fd, MSG_ERROR);
 }
 
 static int msg_read(int fd, void *buf, u32 size, int *n)
@@ -477,9 +511,10 @@ static int tracecmd_msg_send_and_wait_for_msg(int fd, u32 cmd, struct tracecmd_m
 	return 0;
 }
 
-int tracecmd_msg_send_init_data(int fd)
+static int tracecmd_msg_send_init_data(int fd, bool net)
 {
 	struct tracecmd_msg msg;
+	char path[PATH_MAX];
 	int i, cpus;
 	int ret;
 
@@ -488,14 +523,57 @@ int tracecmd_msg_send_init_data(int fd)
 		return ret;
 
 	cpus = ntohl(msg.data.rinit.cpus);
-	client_ports = malloc_or_die(sizeof(int) * cpus);
-	for (i = 0; i < cpus; i++)
-		client_ports[i] = ntohl(msg.data.rinit.port_array[i]);
+	if (net) {
+		client_ports = malloc_or_die(sizeof(int) * cpus);
+		for (i = 0; i < cpus; i++)
+			client_ports[i] = ntohl(msg.data.rinit.port_array[i]);
+	} else {
+		virt_sfds = malloc_or_die(sizeof(int) * cpus);
+
+		/* Open data paths of virtio-serial */
+		for (i = 0; i < cpus; i++) {
+			snprintf(path, PATH_MAX, TRACE_PATH_CPU, i);
+			virt_sfds[i] = open(path, O_WRONLY);
+			if (virt_sfds[i] < 0) {
+				warning("Cannot open %s", TRACE_PATH_CPU, i);
+				return -errno;
+			}
+		}
+	}
 
 	/* Next, send meta data */
 	send_metadata = true;
 
 	return 0;
+}
+
+int tracecmd_msg_send_init_data_net(int fd)
+{
+	return tracecmd_msg_send_init_data(fd, true);
+}
+
+int tracecmd_msg_send_init_data_virt(int fd)
+{
+	return tracecmd_msg_send_init_data(fd, false);
+}
+
+int tracecmd_msg_connect_to_server(int fd)
+{
+	struct tracecmd_msg msg;
+	int ret;
+
+	/* connect to a server */
+	ret = tracecmd_msg_send_and_wait_for_msg(fd, MSG_TCONNECT, &msg);
+	if (ret < 0) {
+		if (ret == -EPROTONOSUPPORT)
+			goto error;
+	}
+
+	return ret;
+
+error:
+	tracecmd_msg_send_error(fd, &msg);
+	return ret;
 }
 
 static bool process_option(struct tracecmd_msg_opt *opt)

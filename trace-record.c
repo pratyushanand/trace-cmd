@@ -91,6 +91,9 @@ static struct tracecmd_output *network_handle;
 /* Max size to let a per cpu file get */
 static int max_kb;
 
+struct tracecmd_output *virt_handle;
+static bool virt;
+
 static int do_ptrace;
 
 static int filter_task;
@@ -2604,6 +2607,9 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 	if (client_ports) {
 		connect_port(cpu);
 		recorder = tracecmd_create_recorder_fd(client_ports[cpu], cpu, recorder_flags);
+	} else if (virt_sfds) {
+		recorder = tracecmd_create_recorder_fd(virt_sfds[cpu], cpu,
+						       recorder_flags);
 	} else {
 		file = get_temp_file(instance, cpu);
 		recorder = create_recorder_instance(instance, file, cpu, brass);
@@ -2639,7 +2645,7 @@ static void check_first_msg_from_server(int fd)
 		die("server not tracecmd server");
 }
 
-static void communicate_with_listener_v1(int fd)
+static void communicate_with_listener_v1_net(int fd)
 {
 	char buf[BUFSIZ];
 	ssize_t n;
@@ -2704,9 +2710,9 @@ static void communicate_with_listener_v1(int fd)
 	}
 }
 
-static void communicate_with_listener_v2(int fd)
+static void communicate_with_listener_v2_net(int fd)
 {
-	if (tracecmd_msg_send_init_data(fd) < 0)
+	if (tracecmd_msg_send_init_data_net(fd) < 0)
 		die("Cannot communicate with server");
 }
 
@@ -2752,6 +2758,15 @@ static void check_protocol_version(int fd)
 			die("Cannot handle the protocol %s", buf);
 		}
 	}
+}
+
+static void communicate_with_listener_virt(int fd)
+{
+	if (tracecmd_msg_connect_to_server(fd) < 0)
+		die("Cannot communicate with server");
+
+	if (tracecmd_msg_send_init_data_virt(fd) < 0)
+		die("Cannot send init data");
 }
 
 static void setup_network(void)
@@ -2809,11 +2824,11 @@ again:
 			close(sfd);
 			goto again;
 		}
-		communicate_with_listener_v2(sfd);
+		communicate_with_listener_v2_net(sfd);
 	}
 
 	if (proto_ver == V1_PROTOCOL)
-		communicate_with_listener_v1(sfd);
+		communicate_with_listener_v1_net(sfd);
 
 	/* Now create the handle through this socket */
 	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events);
@@ -2824,12 +2839,34 @@ again:
 	/* OK, we are all set, let'r rip! */
 }
 
+static void setup_virtio(void)
+{
+	int fd;
+
+	fd = open(AGENT_CTL_PATH, O_RDWR);
+	if (fd < 0)
+		die("Cannot open %s", AGENT_CTL_PATH);
+
+	communicate_with_listener_virt(fd);
+
+	/* Now create the handle through this socket */
+	virt_handle = tracecmd_create_init_fd_glob(fd, listed_events);
+	tracecmd_msg_finish_sending_metadata(fd);
+}
+
 static void finish_network(void)
 {
 	if (proto_ver == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg();
 	close(sfd);
 	free(host);
+}
+
+static void finish_virt(void)
+{
+	tracecmd_msg_send_close_msg();
+	free(virt_handle);
+	free(virt_sfds);
 }
 
 static void start_threads(enum trace_type type, int global)
@@ -2842,6 +2879,8 @@ static void start_threads(enum trace_type type, int global)
 
 	if (host)
 		setup_network();
+	else if (virt)
+		setup_virtio();
 
 	/* make a thread for every CPU we have */
 	pids = malloc(sizeof(*pids) * cpu_count * (buffers + 1));
@@ -2985,6 +3024,9 @@ static void record_data(char *date2ts, int flags)
 
 	if (host) {
 		finish_network();
+		return;
+	} else if (virt) {
+		finish_virt();
 		return;
 	}
 
@@ -4113,7 +4155,7 @@ void update_first_instance(struct buffer_instance *instance, int topt)
 }
 
 enum {
-
+	OPT_virt		= 246,
 	OPT_debug		= 247,
 	OPT_max_graph_depth	= 248,
 	OPT_tsoffset		= 249,
@@ -4324,6 +4366,7 @@ void trace_record (int argc, char **argv)
 			{"by-comm", no_argument, NULL, OPT_bycomm},
 			{"ts-offset", required_argument, NULL, OPT_tsoffset},
 			{"max-graph-depth", required_argument, NULL, OPT_max_graph_depth},
+			{"virt", no_argument, NULL, OPT_virt},
 			{"debug", no_argument, NULL, OPT_debug},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
@@ -4458,6 +4501,8 @@ void trace_record (int argc, char **argv)
 		case 'o':
 			if (host)
 				die("-o incompatible with -N");
+			if (virt)
+				die("-o incompatible with --virt");
 			if (start)
 				die("start does not take output\n"
 				    "Did you mean 'record'?");
@@ -4517,6 +4562,8 @@ void trace_record (int argc, char **argv)
 		case 'N':
 			if (!record)
 				die("-N only available with record");
+			if (virt)
+				die("-N incompatible with --virt");
 			if (output)
 				die("-N incompatible with -o");
 			host = optarg;
@@ -4532,6 +4579,8 @@ void trace_record (int argc, char **argv)
 			instance->cpumask = optarg;
 			break;
 		case 't':
+			if (virt)
+				die("-t incompatible with --virt");
 			if (extract)
 				topt = 1; /* Extract top instance also */
 			else
@@ -4592,6 +4641,17 @@ void trace_record (int argc, char **argv)
 			max_graph_depth = strdup(optarg);
 			if (!max_graph_depth)
 				die("Could not allocate option");
+			break;
+		case OPT_virt:
+			if (!record)
+				die("--virt only available with record");
+			if (host)
+				die("--virt incompatible with -N");
+			if (output)
+				die("--virt incompatible with -o");
+			if (use_tcp)
+				die("--virt incompatible with -t");
+			virt = true;
 			break;
 		case OPT_debug:
 			debug = 1;
