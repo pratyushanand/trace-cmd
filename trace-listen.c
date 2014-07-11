@@ -45,6 +45,13 @@
 #define VAR_DIR_Q(dir)		_VAR_DIR_Q(dir)
 
 #define VAR_RUN_DIR		VAR_DIR_Q(VAR_DIR) "/run"
+#define VAR_LIB_DIR		VAR_DIR_Q(VAR_DIR) "/lib"
+#define TRACE_CMD_DIR		VAR_LIB_DIR "/trace-cmd/"
+#define VIRT_DIR		TRACE_CMD_DIR "virt/"
+#define VIRT_TRACE_CTL_SOCK	VIRT_DIR "agent-ctl-path"
+#define VIRT_DOMAIN_DIR		VIRT_DIR "%s/"
+#define TRACE_PATH_DOMAIN_CPU_O	VIRT_DOMAIN_DIR "trace-path-cpu%d.out"
+#define TRACE_PATH_DOMAIN_CPU_I	VIRT_DOMAIN_DIR "trace-path-cpu%d.in"
 
 static char *default_output_dir = ".";
 static char *output_dir;
@@ -59,10 +66,20 @@ static int proto_ver;
 
 static int do_daemon;
 
+struct domain_dir {
+	struct domain_dir *next;
+	char *name;
+	char *group;
+	mode_t perms;
+	int cpu;
+};
+
 enum {
 	NET	= 1,
 	VIRT	= 2,
 };
+
+struct domain_dir *dom_dir_list;
 
 #define  TEMP_FILE_STR_NET "%s.%s:%s.cpu%d", output_file, host, port, cpu
 #define  TEMP_FILE_STR_VIRT "%s.%s:%d.cpu%d", output_file, domain, virtpid, cpu
@@ -421,18 +438,13 @@ static int open_udp(const char *node, const char *port, int *pid,
 	return num_port;
 }
 
-#define TRACE_CMD_DIR		"/tmp/trace-cmd/"
-#define VIRT_DIR		TRACE_CMD_DIR "virt/"
-#define VIRT_TRACE_CTL_SOCK	VIRT_DIR "agent-ctl-path"
-#define TRACE_PATH_DOMAIN_CPU	VIRT_DIR "%s/trace-path-cpu%d.out"
-
 static int open_virtio_serial_pipe(int *pid, int cpu, int pagesize,
 				   const char *domain, int virtpid)
 {
 	char buf[PATH_MAX];
 	int fd;
 
-	snprintf(buf, PATH_MAX, TRACE_PATH_DOMAIN_CPU, domain, cpu);
+	snprintf(buf, PATH_MAX, TRACE_PATH_DOMAIN_CPU_O, domain, cpu);
 	fd = open(buf, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) {
 		warning("open %s", buf);
@@ -1147,27 +1159,89 @@ static void do_listen_net(char *port)
 	remove_pid_file();
 }
 
-static void make_virt_if_dir(void)
+#define for_each_domain(i) for (i = dom_dir_list; i; i = (i)->next)
+
+static void make_dir_virt(const char *path, mode_t perms, const char *gr_name)
 {
 	struct group *group;
 
-	if (mkdir(TRACE_CMD_DIR, 0710) < 0) {
+	if (mkdir(path, perms) < 0) {
 		if (errno != EEXIST)
-			pdie("mkdir %s", TRACE_CMD_DIR);
+			pdie("mkdir %s", path);
 	}
-	/* QEMU operates as qemu:qemu */
-	chmod(TRACE_CMD_DIR, 0710);
-	group = getgrnam("qemu");
-	if (chown(TRACE_CMD_DIR, -1, group->gr_gid) < 0)
-		pdie("chown %s", TRACE_CMD_DIR);
+	chmod(path, perms);
 
-	if (mkdir(VIRT_DIR, 0710) < 0) {
-		if (errno != EEXIST)
-			pdie("mkdir %s", VIRT_DIR);
+	group = getgrnam(gr_name);
+	if (!group)
+		pdie("getgrnam %s", gr_name);
+	if (chown(path, -1, group->gr_gid) < 0)
+		pdie("chown %s", path);
+}
+
+static void make_traceif_in_dom_dir(const char *name, int cpu)
+{
+	char fifo_in[PATH_MAX];
+	char fifo_out[PATH_MAX];
+	int i;
+
+	for (i = 0; i < cpu; i++) {
+		snprintf(fifo_in, PATH_MAX, TRACE_PATH_DOMAIN_CPU_I, name, i);
+		snprintf(fifo_out, PATH_MAX, TRACE_PATH_DOMAIN_CPU_O, name, i);
+		if (mkfifo(fifo_in, 0644) < 0) {
+			if (errno != EEXIST)
+				pdie("mkfifo %s", fifo_in);
+		}
+		if (mkfifo(fifo_out, 0644) < 0) {
+			if (errno != EEXIST)
+				pdie("mkfifo %s", fifo_out);
+		}
 	}
-	chmod(VIRT_DIR, 0710);
-	if (chown(VIRT_DIR, -1, group->gr_gid) < 0)
-		pdie("chown %s", VIRT_DIR);
+	plog("CPUS: %d\n", cpu);
+}
+
+static void make_domain_dirs(void)
+{
+	struct domain_dir *dom_dir;
+	char gr_name[5] = "qemu";
+	char buf[PATH_MAX];
+	mode_t perms;
+
+	for_each_domain(dom_dir) {
+		snprintf(buf, PATH_MAX, VIRT_DOMAIN_DIR, dom_dir->name);
+
+		if (dom_dir->perms)
+			perms = dom_dir->perms;
+		else
+			perms = 0710;
+
+		if (dom_dir->group)
+			make_dir_virt(buf, perms, dom_dir->group);
+		else
+			make_dir_virt(buf, perms, gr_name);
+
+		plog("---\n"
+		     "Process Directory: %s\n"
+		     "Directory permission: %o\n"
+		     "Group: %s\n", buf, perms, dom_dir->group ? dom_dir->group : gr_name);
+
+		if (dom_dir->cpu)
+			make_traceif_in_dom_dir(dom_dir->name, dom_dir->cpu);
+	}
+
+	plog("---\n");
+	free(dom_dir_list);
+}
+
+static void make_virt_if_dir(void)
+{
+	char gr_name[5] = "qemu";
+
+	/* QEMU operates as qemu:qemu */
+	make_dir_virt(TRACE_CMD_DIR, 0710, gr_name);
+	make_dir_virt(VIRT_DIR, 0710, gr_name);
+
+	if (dom_dir_list)
+		make_domain_dirs();
 }
 
 static void do_listen_virt(void)
@@ -1215,7 +1289,14 @@ static void start_daemon(void)
 		die("starting daemon");
 }
 
+static void add_dom_dir(struct domain_dir *dom_dir)
+{
+	dom_dir->next = dom_dir_list;
+	dom_dir_list = dom_dir;
+}
+
 enum {
+	OPT_dom		= 254,
 	OPT_debug	= 255,
 };
 
@@ -1224,6 +1305,37 @@ static void parse_args_net(int c, char **argv, char **port)
 	switch (c) {
 	case 'p':
 		*port = optarg;
+		break;
+	default:
+		usage(argv);
+	}
+}
+
+static void parse_args_virt(int c, char **argv)
+{
+	static struct domain_dir *dom_dir;
+
+	switch (c) {
+	case 'm':
+		if (!dom_dir)
+			die("-m needs --dom <domain>");
+		dom_dir->perms = strtol(optarg, NULL, 8);
+		break;
+	case 'g':
+		if (!dom_dir)
+			die("-g needs --dom <domain>");
+		dom_dir->group = optarg;
+		break;
+	case 'c':
+		if (!dom_dir)
+			die("-c needs --dom <domain>");
+		dom_dir->cpu = atoi(optarg);
+		break;
+	case OPT_dom:
+		dom_dir = malloc_or_die(sizeof(*dom_dir));
+		memset(dom_dir, 0, sizeof(*dom_dir));
+		dom_dir->name = optarg;
+		add_dom_dir(dom_dir);
 		break;
 	default:
 		usage(argv);
@@ -1252,12 +1364,13 @@ void trace_listen(int argc, char **argv)
 		int option_index = 0;
 		static struct option long_options[] = {
 			{"port", required_argument, NULL, 'p'},
+			{"dom", required_argument, NULL, OPT_dom},
 			{"help", no_argument, NULL, '?'},
 			{"debug", no_argument, NULL, OPT_debug},
 			{NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long (argc-1, argv+1, "+hp:o:d:l:D",
+		c = getopt_long (argc-1, argv+1, "+hp:o:d:l:Dm:g:c:",
 			long_options, &option_index);
 		if (c == -1)
 			break;
@@ -1283,12 +1396,14 @@ void trace_listen(int argc, char **argv)
 		default:
 			if (mode == NET)
 				parse_args_net(c, argv, &port);
+			else if (mode == VIRT)
+				parse_args_virt(c, argv);
 			else
 				usage(argv);
 		}
 	}
 
-	if (!port && mode == NET)
+	if (!port && (mode == NET))
 		usage(argv);
 
 	if ((argc - optind) >= 2)

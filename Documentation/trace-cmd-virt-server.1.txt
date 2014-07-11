@@ -34,39 +34,63 @@ OPTIONS
 *-l* 'filename'::
     This option writes the output messages to a log file instead of standard output.
 
+*--dom* 'domain'::
+    This option makes a directory for the 'domain'. You can use additional options
+    *-m*, *-g*, *-c* after this option for the 'domain'. If you don't use these
+    additional options, the directory is made as 0710 and qemu group and
+    trace data I/Fs(trace-path-cpu*.{in,out}) are not created.
+
+*-m* 'permission'::
+    This option changes the permission of 'domain' directory. If you don't use
+    this option, the default permission is 0710.
+
+*-g* 'group'::
+    This option changes group of 'domain' directory. If you don't use this option,
+    the default group is qemu.
+
+*-c* 'cpu'::
+    This option creates trace data I/Fs(trace-path-cpu*.{in,out}) for each CPU
+    of 'domain'. If you don't use this option, those files are not created.
+
 SET UP
 ------
 Here, an example is written as follows:
 
 1. Run virt-server on a host
-   # trace-cmd virt-server
+   # trace-cmd virt-server --dom guest1 -c 2
 
-2. Make guest domain directory
-   # mkdir -p /tmp/trace-cmd/virt/<DOMAIN>
-   # chmod 710 /tmp/trace-cmd/virt/<DOMAIN>
-   # chgrp qemu /tmp/trace-cmd/virt/<DOMAIN>
-
-3. Make FIFO on the host
-   # mkfifo /tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu{0,1,...,X}.{in,out}
-
-4. Set up of virtio-serial pipe of a guest on the host
+2. Set up of virtio-serial pipe of guest1 on the host
    Add the following tags to domain XML files.
-   # virsh edit <guest domain>
+   # virsh edit guest1
    <channel type='unix'>
       <source mode='connect' path='/tmp/trace-cmd/virt/agent-ctl-path'/>
       <target type='virtio' name='agent-ctl-path'/>
    </channel>
    <channel type='pipe'>
-      <source path='/tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu0'/>
+      <source path='/tmp/trace-cmd/virt/guest1/trace-path-cpu0'/>
       <target type='virtio' name='trace-path-cpu0'/>
    </channel>
-   ... (cpu1, cpu2, ...)
+   <channel type='pipe'>
+      <source path='/tmp/trace-cmd/virt/guest1/trace-path-cpu1'/>
+      <target type='virtio' name='trace-path-cpu1'/>
+   </channel>
 
-5. Boot the guest
-   # virsh start <DOMAIN>
+3. Boot the guest
+   # virsh start guest1
 
-6. Run the guest's client(see trace-cmd-record(1) with the *--virt* option)
+4. Run the guest1's client(see trace-cmd-record(1) with the *--virt* option)
    # trace-cmd record -e sched* --virt
+
+If you want to boot another guest sends trace-data via virtio-serial,
+you will manually make the guest domain directory and trace data I/Fs.
+
+- Make guest domain directory on the host
+   # mkdir -p /tmp/trace-cmd/virt/<DOMAIN>
+   # chmod 710 /tmp/trace-cmd/virt/<DOMAIN>
+   # chgrp qemu /tmp/trace-cmd/virt/<DOMAIN>
+
+- Make FIFO on the host
+   # mkfifo /tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu{0,1,...,X}.{in,out}
 
 SEE ALSO
 --------
