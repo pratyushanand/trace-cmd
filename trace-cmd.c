@@ -431,7 +431,8 @@ int main (int argc, char **argv)
 	} else if (strcmp(argv[1], "mem") == 0) {
 		trace_mem(argc, argv);
 		exit(0);
-	} else if (strcmp(argv[1], "listen") == 0) {
+	} else if (strcmp(argv[1], "listen") == 0 ||
+		   strcmp(argv[1], "virt-server") == 0) {
 		trace_listen(argc, argv);
 		exit(0);
 	} else if (strcmp(argv[1], "split") == 0) {

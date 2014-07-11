@@ -23,9 +23,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <grp.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/epoll.h>
+#include <sys/un.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -55,19 +59,44 @@ static int proto_ver;
 
 static int do_daemon;
 
-#define  TEMP_FILE_STR "%s.%s:%s.cpu%d", output_file, host, port, cpu
-static char *get_temp_file(const char *host, const char *port, int cpu)
+enum {
+	NET	= 1,
+	VIRT	= 2,
+};
+
+#define  TEMP_FILE_STR_NET "%s.%s:%s.cpu%d", output_file, host, port, cpu
+#define  TEMP_FILE_STR_VIRT "%s.%s:%d.cpu%d", output_file, domain, virtpid, cpu
+static char *get_temp_file(const char *host, const char *port,
+			   const char *domain, int virtpid, int cpu, int mode)
 {
 	char *file = NULL;
 	int size;
 
-	size = snprintf(file, 0, TEMP_FILE_STR);
-	file = malloc(size + 1);
-	if (!file)
-		return NULL;
-	sprintf(file, TEMP_FILE_STR);
+	if (mode == NET) {
+		size = snprintf(file, 0, TEMP_FILE_STR_NET);
+		file = malloc(size + 1);
+		if (!file)
+			return NULL;
+		sprintf(file, TEMP_FILE_STR_NET);
+	} else if (mode == VIRT) {
+		size = snprintf(file, 0, TEMP_FILE_STR_VIRT);
+		file = malloc(size + 1);
+		if (!file)
+			return NULL;
+		sprintf(file, TEMP_FILE_STR_VIRT);
+	}
 
 	return file;
+}
+
+static char *get_temp_file_net(const char *host, const char *port, int cpu)
+{
+	return  get_temp_file(host, port, NULL, 0, cpu, NET);
+}
+
+static char *get_temp_file_virt(const char *domain, int virtpid, int cpu)
+{
+	return  get_temp_file(NULL, NULL, domain, virtpid, cpu, VIRT);
 }
 
 static void put_temp_file(char *file)
@@ -88,11 +117,15 @@ static void signal_setup(int sig, sighandler_t handle)
 	sigaction(sig, &action, NULL);
 }
 
-static void delete_temp_file(const char *host, const char *port, int cpu)
+static void delete_temp_file(const char *host, const char *port,
+			     const char *domain, int virtpid, int cpu, int mode)
 {
 	char file[MAX_PATH];
 
-	snprintf(file, MAX_PATH, TEMP_FILE_STR);
+	if (mode == NET)
+		snprintf(file, MAX_PATH, TEMP_FILE_STR_NET);
+	else if (mode == VIRT)
+		snprintf(file, MAX_PATH, TEMP_FILE_STR_VIRT);
 	unlink(file);
 }
 
@@ -120,8 +153,12 @@ static int process_option(char *option)
 	return 0;
 }
 
+static struct tracecmd_recorder *recorder;
+
 static void finish(int sig)
 {
+	if (recorder)
+		tracecmd_stop_recording(recorder);
 	done = true;
 }
 
@@ -164,7 +201,8 @@ void plog(const char *fmt, ...)
 
 static void make_pid_name(int mode, char *buf)
 {
-	snprintf(buf, PATH_MAX, VAR_RUN_DIR "/trace-cmd-net.pid");
+	snprintf(buf, PATH_MAX, VAR_RUN_DIR "/trace-cmd-%s.pid",
+		 mode == VIRT ? "virt" : "net");
 }
 
 static void remove_pid_file(void)
@@ -214,7 +252,7 @@ static int process_udp_child(int sfd, const char *host, const char *port,
 
 	signal_setup(SIGUSR1, finish);
 
-	tempfile = get_temp_file(host, port, cpu);
+	tempfile = get_temp_file_net(host, port, cpu);
 	if (!tempfile)
 		return -ENOMEM;
 
@@ -254,6 +292,30 @@ static int process_udp_child(int sfd, const char *host, const char *port,
 	} while (!done);
 
  done:
+	put_temp_file(tempfile);
+	exit(0);
+}
+
+#define SLEEP_DEFAULT	1000
+
+static int process_virt_child(int fd, int cpu, int pagesize,
+			       const char *domain, int virtpid)
+{
+	char *tempfile;
+
+	signal_setup(SIGUSR1, finish);
+	tempfile = get_temp_file_virt(domain, virtpid, cpu);
+	if (!tempfile)
+		return -ENOMEM;
+
+	recorder = tracecmd_create_recorder_virt(tempfile, cpu, fd);
+
+	do {
+		if (tracecmd_start_recording(recorder, SLEEP_DEFAULT) < 0)
+			break;
+	} while (!done);
+
+	tracecmd_free_recorder(recorder);
 	put_temp_file(tempfile);
 	exit(0);
 }
@@ -305,23 +367,39 @@ static int udp_bind_a_port(int start_port, int *sfd)
 	return num_port;
 }
 
-static void fork_udp_reader(int sfd, const char *node, const char *port,
-			    int *pid, int cpu, int pagesize)
+static void fork_reader(int sfd, const char *node, const char *port,
+			int *pid, int cpu, int pagesize, const char *domain,
+			int virtpid, int mode)
 {
 	int ret;
 
 	*pid = fork();
 
 	if (*pid < 0)
-		pdie("creating udp reader");
+		pdie("creating reader");
 
 	if (!*pid) {
-		ret = process_udp_child(sfd, node, port, cpu, pagesize);
+		if (mode == NET)
+			ret = process_udp_child(sfd, node, port, cpu, pagesize);
+		else if (mode == VIRT)
+			ret = process_virt_child(sfd, cpu, pagesize, domain, virtpid);
 		if (ret < 0)
 			pdie("Problem with udp reader %d", ret);
 	}
 
 	close(sfd);
+}
+
+static void fork_udp_reader(int sfd, const char *node, const char *port,
+			    int *pid, int cpu, int pagesize)
+{
+	fork_reader(sfd, node, port, pid, cpu, pagesize, NULL, 0, NET);
+}
+
+static void fork_virt_reader(int sfd, int *pid, int cpu, int pagesize,
+			     const char *domain, int virtpid)
+{
+	fork_reader(sfd, NULL, NULL, pid, cpu, pagesize, domain, virtpid, VIRT);
 }
 
 static int open_udp(const char *node, const char *port, int *pid,
@@ -343,7 +421,30 @@ static int open_udp(const char *node, const char *port, int *pid,
 	return num_port;
 }
 
-static int communicate_with_client(int fd, int *cpus, int *pagesize)
+#define TRACE_CMD_DIR		"/tmp/trace-cmd/"
+#define VIRT_DIR		TRACE_CMD_DIR "virt/"
+#define VIRT_TRACE_CTL_SOCK	VIRT_DIR "agent-ctl-path"
+#define TRACE_PATH_DOMAIN_CPU	VIRT_DIR "%s/trace-path-cpu%d.out"
+
+static int open_virtio_serial_pipe(int *pid, int cpu, int pagesize,
+				   const char *domain, int virtpid)
+{
+	char buf[PATH_MAX];
+	int fd;
+
+	snprintf(buf, PATH_MAX, TRACE_PATH_DOMAIN_CPU, domain, cpu);
+	fd = open(buf, O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		warning("open %s", buf);
+		return fd;
+	}
+
+	fork_virt_reader(fd, pid, cpu, pagesize, domain, virtpid);
+
+	return fd;
+}
+
+static int communicate_with_client_net(int fd, int *cpus, int *pagesize)
 {
 	char *last_proto = NULL;
 	char buf[BUFSIZ];
@@ -481,12 +582,32 @@ static int communicate_with_client(int fd, int *cpus, int *pagesize)
 	return ret;
 }
 
-static int create_client_file(const char *node, const char *port)
+static int communicate_with_client_virt(int fd, const char *domain,  int *cpus, int *pagesize)
+{
+	proto_ver = V2_PROTOCOL;
+
+	if (tracecmd_msg_set_connection(fd, domain) < 0)
+		return -1;
+
+	/* read the CPU count, the page size, and options */
+	if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0)
+		return -1;
+
+	return 0;
+}
+
+static int create_client_file(const char *node, const char *port,
+			      const char *domain, int pid, int mode)
 {
 	char buf[BUFSIZ];
 	int ofd;
 
-	snprintf(buf, BUFSIZ, "%s.%s:%s.dat", output_file, node, port);
+	if (mode == NET)
+		snprintf(buf, BUFSIZ, "%s.%s:%s.dat", output_file, node, port);
+	else if (mode == VIRT)
+		snprintf(buf, BUFSIZ, "%s.%s:%d.dat", output_file, domain, pid);
+	else
+		plog("create_client_file: Unsupported mode %d", mode);
 
 	ofd = open(buf, O_RDWR | O_CREAT | O_TRUNC, 0644);
 	if (ofd < 0)
@@ -495,7 +616,8 @@ static int create_client_file(const char *node, const char *port)
 }
 
 static void destroy_all_readers(int cpus, int *pid_array, const char *node,
-				const char *port)
+				const char *port, const char *domain,
+				int virtpid, int mode)
 {
 	int cpu;
 
@@ -503,7 +625,7 @@ static void destroy_all_readers(int cpus, int *pid_array, const char *node,
 		if (pid_array[cpu] > 0) {
 			kill(pid_array[cpu], SIGKILL);
 			waitpid(pid_array[cpu], NULL, 0);
-			delete_temp_file(node, port, cpu);
+			delete_temp_file(node, port, domain, virtpid, cpu, mode);
 			pid_array[cpu] = 0;
 		}
 	}
@@ -512,19 +634,23 @@ static void destroy_all_readers(int cpus, int *pid_array, const char *node,
 }
 
 static int *create_all_readers(int cpus, const char *node, const char *port,
-			       int pagesize, int fd)
+			       const char *domain, int virtpid, int pagesize,
+			       int fd, int mode)
 {
 	char buf[BUFSIZ];
-	int *port_array;
+	int *port_array = NULL;
 	int *pid_array;
 	int start_port;
 	int udp_port;
 	int cpu;
 	int pid;
 
-	port_array = malloc(sizeof(int) * cpus);
-	if (!port_array)
-		return NULL;
+	if (mode == NET) {
+		port_array = malloc(sizeof(int) * cpus);
+		if (!port_array)
+			return NULL;
+		start_port = START_PORT_SEARCH;
+	}
 
 	pid_array = malloc(sizeof(int) * cpus);
 	if (!pid_array) {
@@ -534,21 +660,25 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 
 	memset(pid_array, 0, sizeof(int) * cpus);
 
-	start_port = START_PORT_SEARCH;
-
-	/* Now create a UDP port for each CPU */
+	/* Now create a reader for each CPU */
 	for (cpu = 0; cpu < cpus; cpu++) {
-		udp_port = open_udp(node, port, &pid, cpu,
-				    pagesize, start_port);
-		if (udp_port < 0)
-			goto out_free;
-		port_array[cpu] = udp_port;
+		if (node) {
+			udp_port = open_udp(node, port, &pid, cpu,
+					    pagesize, start_port);
+			if (udp_port < 0)
+				goto out_free;
+			port_array[cpu] = udp_port;
+			/*
+			 * Due to some bugging finding ports,
+			 * force search after last port
+			 */
+			start_port = udp_port + 1;
+		} else {
+			if (open_virtio_serial_pipe(&pid, cpu, pagesize,
+						    domain, virtpid) < 0)
+				goto out_free;
+		}
 		pid_array[cpu] = pid;
-		/*
-		 * Due to some bugging finding ports,
-		 * force search after last port
-		 */
-		start_port = udp_port + 1;
 	}
 
 	if (proto_ver == V2_PROTOCOL) {
@@ -569,7 +699,7 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 	return pid_array;
 
  out_free:
-	destroy_all_readers(cpus, pid_array, node, port);
+	destroy_all_readers(cpus, pid_array, node, port, domain, virtpid, mode);
 	return NULL;
 }
 
@@ -611,7 +741,8 @@ static void stop_all_readers(int cpus, int *pid_array)
 }
 
 static int put_together_file(int cpus, int ofd, const char *node,
-			      const char *port)
+			     const char *port, const char *domain, int virtpid,
+			     int mode)
 {
 	char **temp_files;
 	int cpu;
@@ -623,7 +754,8 @@ static int put_together_file(int cpus, int ofd, const char *node,
 		return -ENOMEM;
 
 	for (cpu = 0; cpu < cpus; cpu++) {
-		temp_files[cpu] = get_temp_file(node, port, cpu);
+		temp_files[cpu] = get_temp_file(node, port, domain,
+						virtpid, cpu, mode);
 		if (!temp_files[cpu])
 			goto out;
 	}
@@ -638,7 +770,8 @@ static int put_together_file(int cpus, int ofd, const char *node,
 	return ret;
 }
 
-static int process_client(const char *node, const char *port, int fd)
+static int process_client(int fd, const char *node, const char *port,
+			   const char *domain, int virtpid, int mode)
 {
 	int *pid_array;
 	int pagesize;
@@ -646,13 +779,20 @@ static int process_client(const char *node, const char *port, int fd)
 	int ofd;
 	int ret;
 
-	ret = communicate_with_client(fd, &cpus, &pagesize);
-	if (ret < 0)
-		return ret;
+	if (mode == NET) {
+		ret = communicate_with_client_net(fd, &cpus, &pagesize);
+		if (ret < 0)
+			return ret;
+	} else if (mode == VIRT) {
+		ret = communicate_with_client_virt(fd, domain, &cpus, &pagesize);
+		if (ret < 0)
+			return ret;
+	} else
+		return -EINVAL;
 
-	ofd = create_client_file(node, port);
-
-	pid_array = create_all_readers(cpus, node, port, pagesize, fd);
+	ofd = create_client_file(node, port, domain, virtpid, mode);
+	pid_array = create_all_readers(cpus, node, port, domain, virtpid,
+				       pagesize, fd, mode);
 	if (!pid_array)
 		return -ENOMEM;
 
@@ -671,9 +811,26 @@ static int process_client(const char *node, const char *port, int fd)
 	/* wait a little to have the readers clean up */
 	sleep(1);
 
-	ret = put_together_file(cpus, ofd, node, port);
+	ret = put_together_file(cpus, ofd, node, port, domain, virtpid, mode);
 
-	destroy_all_readers(cpus, pid_array, node, port);
+	destroy_all_readers(cpus, pid_array, node, port, domain, virtpid, mode);
+
+	return ret;
+}
+
+static int process_client_net(int fd, const char *node, const char *port)
+{
+	return process_client(fd, node, port, NULL, 0, NET);
+}
+
+static int process_client_virt(int fd, const char *domain, int virtpid)
+{
+	int ret;
+
+	/* keep connection to qemu if clients on guests finish operation */
+	do {
+		ret = process_client(fd, NULL, NULL, domain, virtpid, VIRT);
+	} while (!done && !ret);
 
 	return ret;
 }
@@ -702,32 +859,104 @@ static int do_fork(int cfd)
 	return 0;
 }
 
-static int do_connection(int cfd, struct sockaddr_storage *peer_addr,
-			  socklen_t peer_addr_len)
+static int get_virtpid(int cfd)
+{
+	struct ucred cr;
+	socklen_t cl;
+	int ret;
+
+	cl = sizeof(cr);
+	ret = getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cr, &cl);
+	if (ret < 0)
+		return ret;
+
+	return cr.pid;
+}
+
+#define LIBVIRT_DOMAIN_PATH     "/var/run/libvirt/qemu/"
+
+/* We can convert pid to domain name of a guest when we use libvirt. */
+static char *get_guest_domain_from_pid(int pid)
+{
+	struct dirent *dirent;
+	char file_name[NAME_MAX];
+	char *file_name_ret, *domain;
+	char buf[BUFSIZ];
+	DIR *dir;
+	size_t doml;
+	int fd;
+
+	dir = opendir(LIBVIRT_DOMAIN_PATH);
+	if (!dir) {
+		if (errno == ENOENT)
+			warning("Only support for using libvirt");
+		return NULL;
+	}
+
+	for (dirent = readdir(dir); dirent != NULL; dirent = readdir(dir)) {
+		snprintf(file_name, NAME_MAX, LIBVIRT_DOMAIN_PATH"%s",
+			 dirent->d_name);
+		file_name_ret = strstr(file_name, ".pid");
+		if (file_name_ret) {
+			fd = open(file_name, O_RDONLY);
+			if (fd < 0)
+				return NULL;
+			if (read(fd, buf, BUFSIZ) < 0)
+				return NULL;
+
+			if (pid == atoi(buf)) {
+				/* not include /var/run/libvirt/qemu */
+				doml = (size_t)(file_name_ret - file_name)
+					- strlen(LIBVIRT_DOMAIN_PATH);
+				domain = strndup(file_name +
+						 strlen(LIBVIRT_DOMAIN_PATH),
+						 doml);
+				plog("start %s:%d\n", domain, pid);
+				return domain;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static int do_connection(int cfd, struct sockaddr *peer_addr,
+			 socklen_t peer_addr_len, int mode)
 {
 	char host[NI_MAXHOST], service[NI_MAXSERV];
-	int s;
-	int ret;
+	int s, ret, virtpid;
+	char *domain = NULL;
+
+	if (mode == VIRT) {
+		virtpid = get_virtpid(cfd);
+		if (virtpid < 0)
+			return virtpid;
+
+		domain = get_guest_domain_from_pid(virtpid);
+		if (!domain)
+			return -1;
+	}
 
 	ret = do_fork(cfd);
 	if (ret)
 		return ret;
 
-	s = getnameinfo((struct sockaddr *)peer_addr, peer_addr_len,
-			host, NI_MAXHOST,
-			service, NI_MAXSERV, NI_NUMERICSERV);
+	if (mode == NET) {
+		s = getnameinfo(peer_addr, peer_addr_len, host, NI_MAXHOST,
+				service, NI_MAXSERV, NI_NUMERICSERV);
 
-	if (s == 0)
-		plog("Connected with %s:%s\n",
-		       host, service);
-	else {
-		plog("Error with getnameinfo: %s\n",
-		       gai_strerror(s));
-		close(cfd);
-		return -1;
-	}
-
-	process_client(host, service, cfd);
+		if (s == 0)
+			plog("Connected with %s:%s\n",
+			       host, service);
+		else {
+			plog("Error with getnameinfo: %s\n",
+			       gai_strerror(s));
+			close(cfd);
+			return -1;
+		}
+		process_client_net(cfd, host, service);
+	} else if (mode == VIRT)
+		process_client_virt(cfd, domain, virtpid);
 
 	close(cfd);
 
@@ -785,14 +1014,13 @@ static void remove_process(int pid)
 
 static void kill_clients(void)
 {
-	int status;
 	int i;
 
 	for (i = 0; i < saved_pids; i++) {
 		if (!client_pids[i])
 			continue;
 		kill(client_pids[i], SIGINT);
-		waitpid(client_pids[i], &status, 0);
+		waitpid(client_pids[i], NULL, 0);
 	}
 
 	saved_pids = 0;
@@ -811,25 +1039,33 @@ static void clean_up(void)
 	} while (ret > 0);
 }
 
-static void do_accept_loop(int sfd)
+static void do_accept_loop(int sfd, int mode)
 {
-	struct sockaddr_storage peer_addr;
-	socklen_t peer_addr_len;
+	struct sockaddr addr;
+	socklen_t addrlen;
 	int cfd, pid;
 
-	peer_addr_len = sizeof(peer_addr);
+	if (mode == NET)
+		addrlen = sizeof(struct sockaddr_storage);
+	else if (mode == VIRT)
+		addrlen = sizeof(struct sockaddr_un);
+	else
+		pdie("do_accept_loop: Unsupported mode %d", mode);
 
 	do {
-		cfd = accept(sfd, (struct sockaddr *)&peer_addr,
-			     &peer_addr_len);
+		cfd = accept(sfd, &addr, &addrlen);
 		if (cfd < 0 && errno == EINTR) {
 			clean_up();
 			continue;
 		}
 		if (cfd < 0)
 			pdie("connecting");
+		printf("connected!\n");
 
-		pid = do_connection(cfd, &peer_addr, peer_addr_len);
+		if (mode == NET)
+			pid = do_connection(cfd, &addr, addrlen, mode);
+		else if (mode == VIRT)
+			pid = do_connection(cfd, NULL, 0, mode);
 		if (pid > 0)
 			add_process(pid);
 
@@ -864,7 +1100,7 @@ static void sigstub(int sig)
 {
 }
 
-static void do_listen(char *port)
+static void do_listen_net(char *port)
 {
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
@@ -904,8 +1140,68 @@ static void do_listen(char *port)
 	if (listen(sfd, backlog) < 0)
 		pdie("listen");
 
-	do_accept_loop(sfd);
+	do_accept_loop(sfd, NET);
 
+	kill_clients();
+
+	remove_pid_file();
+}
+
+static void make_virt_if_dir(void)
+{
+	struct group *group;
+
+	if (mkdir(TRACE_CMD_DIR, 0710) < 0) {
+		if (errno != EEXIST)
+			pdie("mkdir %s", TRACE_CMD_DIR);
+	}
+	/* QEMU operates as qemu:qemu */
+	chmod(TRACE_CMD_DIR, 0710);
+	group = getgrnam("qemu");
+	if (chown(TRACE_CMD_DIR, -1, group->gr_gid) < 0)
+		pdie("chown %s", TRACE_CMD_DIR);
+
+	if (mkdir(VIRT_DIR, 0710) < 0) {
+		if (errno != EEXIST)
+			pdie("mkdir %s", VIRT_DIR);
+	}
+	chmod(VIRT_DIR, 0710);
+	if (chown(VIRT_DIR, -1, group->gr_gid) < 0)
+		pdie("chown %s", VIRT_DIR);
+}
+
+static void do_listen_virt(void)
+{
+	struct sockaddr_un un_server;
+	struct group *group;
+	socklen_t slen;
+	int sfd;
+
+	make_virt_if_dir();
+
+	make_pid_file();
+
+	slen = sizeof(un_server);
+	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sfd < 0)
+		pdie("socket");
+
+	un_server.sun_family = AF_UNIX;
+	snprintf(un_server.sun_path, PATH_MAX, VIRT_TRACE_CTL_SOCK);
+
+	if (bind(sfd, (struct sockaddr *)&un_server, slen) < 0)
+		pdie("bind");
+	chmod(VIRT_TRACE_CTL_SOCK, 0660);
+	group = getgrnam("qemu");
+	if (chown(VIRT_TRACE_CTL_SOCK, -1, group->gr_gid) < 0)
+		pdie("fchown %s", VIRT_TRACE_CTL_SOCK);
+
+	if (listen(sfd, backlog) < 0)
+		pdie("listen");
+
+	do_accept_loop(sfd, VIRT);
+
+	unlink(VIRT_TRACE_CTL_SOCK);
 	kill_clients();
 
 	remove_pid_file();
@@ -923,17 +1219,33 @@ enum {
 	OPT_debug	= 255,
 };
 
+static void parse_args_net(int c, char **argv, char **port)
+{
+	switch (c) {
+	case 'p':
+		*port = optarg;
+		break;
+	default:
+		usage(argv);
+	}
+}
+
 void trace_listen(int argc, char **argv)
 {
 	char *logfile = NULL;
 	char *port = NULL;
 	int daemon = 0;
+	int mode = 0;
 	int c;
 
 	if (argc < 2)
 		usage(argv);
 
-	if (strcmp(argv[1], "listen") != 0)
+	if (strcmp(argv[1], "listen") == 0)
+		mode = NET;
+	else if (strcmp(argv[1], "virt-server") == 0)
+		mode = VIRT;
+	else
 		usage(argv);
 
 	for (;;) {
@@ -953,9 +1265,6 @@ void trace_listen(int argc, char **argv)
 		case 'h':
 			usage(argv);
 			break;
-		case 'p':
-			port = optarg;
-			break;
 		case 'd':
 			output_dir = optarg;
 			break;
@@ -972,11 +1281,14 @@ void trace_listen(int argc, char **argv)
 			debug = 1;
 			break;
 		default:
-			usage(argv);
+			if (mode == NET)
+				parse_args_net(c, argv, &port);
+			else
+				usage(argv);
 		}
 	}
 
-	if (!port)
+	if (!port && mode == NET)
 		usage(argv);
 
 	if ((argc - optind) >= 2)
@@ -1004,7 +1316,12 @@ void trace_listen(int argc, char **argv)
 	signal_setup(SIGINT, finish);
 	signal_setup(SIGTERM, finish);
 
-	do_listen(port);
+	if (mode == NET)
+		do_listen_net(port);
+	else if (mode == VIRT)
+		do_listen_virt();
+	else
+		; /* Not reached */
 
 	return;
 }

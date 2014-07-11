@@ -1,0 +1,89 @@
+TRACE-CMD-VIRT-SERVER(1)
+========================
+
+NAME
+----
+trace-cmd-virt-server - listen for incoming connection to record tracing of
+                        guests' clients
+
+SYNOPSIS
+--------
+*trace-cmd virt-server ['OPTIONS']
+
+DESCRIPTION
+-----------
+The trace-cmd(1) virt-server sets up UNIX domain socket I/F for communicating
+with guests' clients that run 'trace-cmd-record(1)' with the *--virt* option.
+When a connection is made, and the guest's client sends data, it will create a
+file called 'trace.DOMAIN.dat'. Where DOMAIN is the name of the guest named
+by libvirt.
+
+OPTIONS
+-------
+*-D*::
+    This options causes trace-cmd listen to go into a daemon mode and run in
+    the background.
+
+*-d* 'dir'::
+    This option specifies a directory to write the data files into.
+
+*-o* 'filename'::
+    This option overrides the default 'trace' in the 'trace.DOMAIN.dat' that
+    is created when guest's client connects.
+
+*-l* 'filename'::
+    This option writes the output messages to a log file instead of standard output.
+
+SET UP
+------
+Here, an example is written as follows:
+
+1. Run virt-server on a host
+   # trace-cmd virt-server
+
+2. Make guest domain directory
+   # mkdir -p /tmp/trace-cmd/virt/<DOMAIN>
+   # chmod 710 /tmp/trace-cmd/virt/<DOMAIN>
+   # chgrp qemu /tmp/trace-cmd/virt/<DOMAIN>
+
+3. Make FIFO on the host
+   # mkfifo /tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu{0,1,...,X}.{in,out}
+
+4. Set up of virtio-serial pipe of a guest on the host
+   Add the following tags to domain XML files.
+   # virsh edit <guest domain>
+   <channel type='unix'>
+      <source mode='connect' path='/tmp/trace-cmd/virt/agent-ctl-path'/>
+      <target type='virtio' name='agent-ctl-path'/>
+   </channel>
+   <channel type='pipe'>
+      <source path='/tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu0'/>
+      <target type='virtio' name='trace-path-cpu0'/>
+   </channel>
+   ... (cpu1, cpu2, ...)
+
+5. Boot the guest
+   # virsh start <DOMAIN>
+
+6. Run the guest's client(see trace-cmd-record(1) with the *--virt* option)
+   # trace-cmd record -e sched* --virt
+
+SEE ALSO
+--------
+trace-cmd(1), trace-cmd-record(1), trace-cmd-report(1), trace-cmd-start(1),
+trace-cmd-stop(1), trace-cmd-extract(1), trace-cmd-reset(1),
+trace-cmd-split(1), trace-cmd-list(1)
+
+AUTHOR
+------
+Written by Yoshihiro YUNOMAE, <yoshihiro.yunomae.ex@hitachi.com>
+
+RESOURCES
+---------
+git://git.kernel.org/pub/scm/linux/kernel/git/rostedt/trace-cmd.git
+
+COPYING
+-------
+Copyright \(C) 2013 Hitachi, Ltd. Free use of this software is granted under
+the terms of the GNU Public License (GPL).
+
