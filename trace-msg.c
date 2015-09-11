@@ -121,6 +121,7 @@ enum tracecmd_msg_cmd {
 	MSG_RINIT	= 5,
 	MSG_SENDMETA	= 6,
 	MSG_FINMETA	= 7,
+	MSG_MAX
 };
 
 struct tracecmd_msg {
@@ -316,7 +317,7 @@ static int tracecmd_msg_send(int fd, u32 cmd)
 	struct tracecmd_msg msg;
 	int ret = 0;
 
-	if (cmd > MSG_FINMETA) {
+	if (cmd >= MSG_MAX) {
 		plog("Unsupported command: %d\n", cmd);
 		return -EINVAL;
 	}
