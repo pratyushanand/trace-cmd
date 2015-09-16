@@ -888,7 +888,7 @@ static int get_virtpid(int cfd)
 #define LIBVIRT_DOMAIN_PATH     "/var/run/libvirt/qemu/"
 
 /* We can convert pid to domain name of a guest when we use libvirt. */
-static char *get_guest_domain_from_pid(int pid)
+static char *get_guest_domain_from_pid_libvirt(int pid)
 {
 	struct dirent *dirent;
 	char file_name[NAME_MAX];
@@ -932,6 +932,80 @@ static char *get_guest_domain_from_pid(int pid)
 	return NULL;
 }
 
+static int get_cmd_arg(int fd, char *buf, int size)
+{
+	static int last_size;
+	static int last_r;
+	int r;
+	int i;
+
+	if (last_size) {
+		memmove(buf, buf + last_r, last_size);
+		size -= last_size;
+	}
+
+	r = read(fd, buf + last_size, size - 1);
+	if (r < 0)
+		return r;
+	r += last_size;
+	buf[r] = 0;
+
+	for (i = 0; i < r; i++) {
+		if (!buf[i])
+			break;
+	}
+	if (!r)
+		return 0;
+
+	if (i < r) {
+		i++; /* add the \0 */
+		last_size = r - i;
+		last_r = i;
+		return last_r;
+	}
+
+	return 0;
+}
+
+/* We can convert pid to domain name of a guest when we use qemu. */
+static char *get_guest_domain_from_pid(int pid)
+{
+	char buf[BUFSIZ];
+	char path[PATH_MAX];
+	char *domain;
+	int fd;
+	int r;
+
+	/*
+	 * We have the pid, now look at the cmdline to find
+	 * the --name option.
+	 */
+	snprintf(path, PATH_MAX, "/proc/%d/cmdline", pid);
+	fd = open(path, O_RDONLY);
+	if (fd < 0)
+		goto fail;
+
+	do {
+		r = get_cmd_arg(fd, buf, BUFSIZ);
+		if (r < 0)
+			goto fail;
+		if (r > 0 && strcmp(buf, "-name") == 0) {
+			r = get_cmd_arg(fd, buf, BUFSIZ);
+			/* We better have something */
+			if (r < 1)
+				goto fail;
+			domain = strdup(buf);
+			close(fd);
+			return domain;
+		}
+	} while (r);
+
+ fail:
+	close(fd);
+	plog("Failed getting domain from qemu args, try libvirt\n");
+	return get_guest_domain_from_pid_libvirt(pid);
+}
+
 static int do_connection(int cfd, struct sockaddr *peer_addr,
 			 socklen_t peer_addr_len, int mode)
 {
@@ -947,6 +1021,7 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 		domain = get_guest_domain_from_pid(virtpid);
 		if (!domain)
 			return -1;
+		plog("start %s:%d\n", domain, virtpid);
 	}
 
 	ret = do_fork(cfd);
