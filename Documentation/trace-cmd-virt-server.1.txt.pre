@@ -63,15 +63,15 @@ Here, an example is written as follows:
    Add the following tags to domain XML files.
    # virsh edit guest1
    <channel type='unix'>
-      <source mode='connect' path='/tmp/trace-cmd/virt/agent-ctl-path'/>
+      <source mode='connect' path='VAR_DIR/lib/trace-cmd/virt/agent-ctl-path'/>
       <target type='virtio' name='agent-ctl-path'/>
    </channel>
    <channel type='pipe'>
-      <source path='/tmp/trace-cmd/virt/guest1/trace-path-cpu0'/>
+      <source path='VAR_DIR/lib/trace-cmd/virt/guest1/trace-path-cpu0'/>
       <target type='virtio' name='trace-path-cpu0'/>
    </channel>
    <channel type='pipe'>
-      <source path='/tmp/trace-cmd/virt/guest1/trace-path-cpu1'/>
+      <source path='VAR_DIR/lib/trace-cmd/virt/guest1/trace-path-cpu1'/>
       <target type='virtio' name='trace-path-cpu1'/>
    </channel>
 
@@ -85,12 +85,12 @@ If you want to boot another guest sends trace-data via virtio-serial,
 you will manually make the guest domain directory and trace data I/Fs.
 
 - Make guest domain directory on the host
-   # mkdir -p /tmp/trace-cmd/virt/<DOMAIN>
-   # chmod 710 /tmp/trace-cmd/virt/<DOMAIN>
-   # chgrp qemu /tmp/trace-cmd/virt/<DOMAIN>
+   # mkdir -p VAR_DIR/lib/trace-cmd/virt/<DOMAIN>
+   # chmod 710 VAR_DIR/lib/trace-cmd/virt/<DOMAIN>
+   # chgrp qemu VAR_DIR/lib/trace-cmd/virt/<DOMAIN>
 
 - Make FIFO on the host
-   # mkfifo /tmp/trace-cmd/virt/<DOMAIN>/trace-path-cpu{0,1,...,X}.{in,out}
+   # mkfifo VAR_DIR/lib/trace-cmd/virt/<DOMAIN>/trace-path-cpu{0,1,...,X}.{in,out}
 
 SEE ALSO
 --------
