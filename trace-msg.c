@@ -621,7 +621,7 @@ int tracecmd_msg_set_connection(int fd, const char *domain)
 		if (!msg.cmd) {
 			/* No data means QEMU has already died. */
 			close(fd);
-			die("Connection refuesd: %s", domain);
+			die("Connection refused: %s", domain);
 		}
 		return -ENOMSG;
 	}
