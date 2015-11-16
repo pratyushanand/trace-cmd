@@ -1253,7 +1253,7 @@ static void make_dir_group(const char *path, mode_t perms, const char *gr_name)
 
 	group = getgrnam(gr_name);
 	if (!group)
-		pdie("getgrnam %s", gr_name);
+		pdie("Required group '%s' does not exist.", gr_name);
 	if (chown(path, -1, group->gr_gid) < 0)
 		pdie("chown %s", path);
 }
