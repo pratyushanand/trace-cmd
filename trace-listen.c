@@ -33,6 +33,7 @@
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <errno.h>
 
@@ -1126,36 +1127,61 @@ static void clean_up(void)
 	} while (ret > 0);
 }
 
-static void do_accept_loop(int sfd, int mode)
+static void do_accept_loop(int nfd, int vfd)
 {
 	struct sockaddr addr;
 	socklen_t addrlen;
+	struct pollfd fds[2];
 	int cfd, pid;
+	int ret;
+	int i;
 
-	if (mode == NET)
-		addrlen = sizeof(struct sockaddr_storage);
-	else if (mode == VIRT)
-		addrlen = sizeof(struct sockaddr_un);
-	else
-		pdie("do_accept_loop: Unsupported mode %d", mode);
+	memset(fds, 0, sizeof(fds));
+
+	fds[0].fd = nfd;
+	fds[0].events = POLLIN;
+
+	fds[1].fd = vfd;
+	fds[1].events = POLLIN;
 
 	do {
-		cfd = accept(sfd, &addr, &addrlen);
-		if (cfd < 0 && errno == EINTR) {
-			clean_up();
-			continue;
+		ret = poll(fds, 2, -1);
+
+		if (ret < 0) {
+			if (errno == EINTR) {
+				clean_up();
+				continue;
+			}
+			pdie("poll");
 		}
-		if (cfd < 0)
-			pdie("connecting");
-		printf("connected!\n");
 
-		if (mode == NET)
-			pid = do_connection(cfd, &addr, addrlen, mode);
-		else if (mode == VIRT)
-			pid = do_connection(cfd, NULL, 0, mode);
-		if (pid > 0)
-			add_process(pid);
+		if (!ret)
+			continue;
 
+		for (i = 0; i < 2; i++) {
+
+			if (!fds[i].revents & POLLIN)
+				continue;
+
+			if (i == 0)
+				addrlen = sizeof(struct sockaddr_storage);
+			else
+				addrlen = sizeof(struct sockaddr_un);
+
+			cfd = accept(fds[i].fd, &addr, &addrlen);
+			printf("connected!\n");
+			if (cfd < 0 && errno == EINTR)
+				continue;
+			if (cfd < 0)
+				pdie("connecting");
+
+			if (i == 0)
+				pid = do_connection(cfd, &addr, addrlen, NET);
+			else
+				pid = do_connection(cfd, NULL, 0, VIRT);
+			if (pid > 0)
+				add_process(pid);
+		}
 	} while (!done);
 	/* Get any final stragglers */
 	clean_up();
@@ -1183,20 +1209,11 @@ static void make_pid_file(void)
 	close(fd);
 }
 
-static void sigstub(int sig)
-{
-}
-
-static void do_listen_net(char *port)
+static int set_up_net(char *port)
 {
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
 	int sfd, s;
-
-	if (!debug)
-		signal_setup(SIGCHLD, sigstub);
-
-	make_pid_file();
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_UNSPEC;
@@ -1227,11 +1244,7 @@ static void do_listen_net(char *port)
 	if (listen(sfd, backlog) < 0)
 		pdie("listen");
 
-	do_accept_loop(sfd, NET);
-
-	kill_clients();
-
-	remove_pid_file();
+	return sfd;
 }
 
 #define for_each_domain(i) for (i = dom_dir_list; i; i = (i)->next)
@@ -1324,7 +1337,7 @@ static void make_virt_if_dir(void)
 		make_domain_dirs();
 }
 
-static void do_listen_virt(void)
+static int set_up_virt(void)
 {
 	struct sockaddr_un un_server;
 	struct group *group;
@@ -1332,8 +1345,6 @@ static void do_listen_virt(void)
 	int sfd;
 
 	make_virt_if_dir();
-
-	make_pid_file();
 
 	slen = sizeof(un_server);
 	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1353,11 +1364,17 @@ static void do_listen_virt(void)
 	if (listen(sfd, backlog) < 0)
 		pdie("listen");
 
-	do_accept_loop(sfd, VIRT);
+	return sfd;
+}
 
-	unlink(VIRT_TRACE_CTL_SOCK);
+static void do_listen(int nfd, int vfd)
+{
+	do_accept_loop(nfd, vfd);
+
+	if (vfd >= 0)
+		unlink(VIRT_TRACE_CTL_SOCK);
+
 	kill_clients();
-
 	remove_pid_file();
 }
 
@@ -1380,65 +1397,26 @@ enum {
 	OPT_debug	= 255,
 };
 
-static void parse_args_net(int c, char **argv, char **port)
+static void sigstub(int sig)
 {
-	switch (c) {
-	case 'p':
-		*port = optarg;
-		break;
-	default:
-		usage(argv);
-	}
-}
-
-static void parse_args_virt(int c, char **argv)
-{
-	static struct domain_dir *dom_dir;
-
-	switch (c) {
-	case 'm':
-		if (!dom_dir)
-			die("-m needs --dom <domain>");
-		dom_dir->perms = strtol(optarg, NULL, 8);
-		break;
-	case 'g':
-		if (!dom_dir)
-			die("-g needs --dom <domain>");
-		dom_dir->group = optarg;
-		break;
-	case 'c':
-		if (!dom_dir)
-			die("-c needs --dom <domain>");
-		dom_dir->cpu = atoi(optarg);
-		break;
-	case OPT_dom:
-		dom_dir = malloc_or_die(sizeof(*dom_dir));
-		memset(dom_dir, 0, sizeof(*dom_dir));
-		dom_dir->name = optarg;
-		add_dom_dir(dom_dir);
-		break;
-	default:
-		usage(argv);
-	}
 }
 
 void trace_listen(int argc, char **argv)
 {
+	struct domain_dir *dom_dir = NULL;
 	char *logfile = NULL;
 	char *port = NULL;
 	int daemon = 0;
-	int mode = 0;
+	int virt = 0;
+	int nfd = -1;
+	int vfd = -1;
 	int c;
 
 	if (argc < 2)
 		usage(argv);
 
-	if (strcmp(argv[1], "listen") == 0)
-		mode = NET;
-	else if (strcmp(argv[1], "virt-server") == 0)
-		mode = VIRT;
-	else
-		usage(argv);
+	if (strcmp(argv[1], "virt-server") == 0)
+		virt = 1;
 
 	for (;;) {
 		int option_index = 0;
@@ -1473,17 +1451,44 @@ void trace_listen(int argc, char **argv)
 		case OPT_debug:
 			debug = 1;
 			break;
+		case 'p':
+			port = optarg;
+			break;
+		case 'm':
+			if (!virt)
+				die("-m requires --virt first");
+			if (!dom_dir)
+				die("-m needs --dom <domain>");
+			dom_dir->perms = strtol(optarg, NULL, 8);
+			break;
+		case 'g':
+			if (!virt)
+				die("-g requires --virt first");
+			if (!dom_dir)
+				die("-g needs --dom <domain>");
+			dom_dir->group = optarg;
+			break;
+		case 'c':
+			if (!virt)
+				die("-c requires --virt first");
+			if (!dom_dir)
+				die("-c needs --dom <domain>");
+			dom_dir->cpu = atoi(optarg);
+			break;
+		case OPT_dom:
+			if (!virt)
+				die("--dom requires --virt first");
+			dom_dir = malloc_or_die(sizeof(*dom_dir));
+			memset(dom_dir, 0, sizeof(*dom_dir));
+			dom_dir->name = optarg;
+			add_dom_dir(dom_dir);
+			break;
 		default:
-			if (mode == NET)
-				parse_args_net(c, argv, &port);
-			else if (mode == VIRT)
-				parse_args_virt(c, argv);
-			else
-				usage(argv);
+			usage(argv);
 		}
 	}
 
-	if (!port && (mode == NET))
+	if (!port && !virt)
 		usage(argv);
 
 	if ((argc - optind) >= 2)
@@ -1511,12 +1516,18 @@ void trace_listen(int argc, char **argv)
 	signal_setup(SIGINT, finish);
 	signal_setup(SIGTERM, finish);
 
-	if (mode == NET)
-		do_listen_net(port);
-	else if (mode == VIRT)
-		do_listen_virt();
-	else
-		; /* Not reached */
+	if (!debug)
+		signal_setup(SIGCHLD, sigstub);
+
+	make_pid_file();
+
+	if (port)
+		nfd = set_up_net(port);
+
+	if (virt)
+		vfd = set_up_virt();
+
+	do_listen(nfd, vfd);
 
 	return;
 }
