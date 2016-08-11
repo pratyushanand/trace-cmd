@@ -1393,6 +1393,7 @@ static void add_dom_dir(struct domain_dir *dom_dir)
 }
 
 enum {
+	OPT_virt	= 253,
 	OPT_dom		= 254,
 	OPT_debug	= 255,
 };
@@ -1415,13 +1416,11 @@ void trace_listen(int argc, char **argv)
 	if (argc < 2)
 		usage(argv);
 
-	if (strcmp(argv[1], "virt-server") == 0)
-		virt = 1;
-
 	for (;;) {
 		int option_index = 0;
 		static struct option long_options[] = {
 			{"port", required_argument, NULL, 'p'},
+			{"virt", no_argument, NULL, OPT_virt},
 			{"dom", required_argument, NULL, OPT_dom},
 			{"help", no_argument, NULL, '?'},
 			{"debug", no_argument, NULL, OPT_debug},
@@ -1482,6 +1481,9 @@ void trace_listen(int argc, char **argv)
 			memset(dom_dir, 0, sizeof(*dom_dir));
 			dom_dir->name = optarg;
 			add_dom_dir(dom_dir);
+			break;
+		case OPT_virt:
+			virt = 1;
 			break;
 		default:
 			usage(argv);

@@ -69,10 +69,10 @@ MAN1 = $(patsubst %.1.txt,$(obj)/%.1, ${TEXT1})
 TEXT5 = $(wildcard *.5.txt)
 MAN5 = $(patsubst %.5.txt,$(obj)/%.5, ${TEXT5})
 
-trace-cmd-virt-server.1.txt: trace-cmd-virt-server.1.txt.pre
+trace-cmd-listen.1.txt: trace-cmd-listen.1.txt.pre
 	$(Q)sed -e "s&VAR_DIR&$(var_dir)&" $^ > $@
 
-all: trace-cmd-virt-server.1.txt $(MAN1) $(MAN5)
+all: trace-cmd-listen.1.txt $(MAN1) $(MAN5)
 
 # Need to find out how to export a macro instead of
 # copying this from the main Makefile.

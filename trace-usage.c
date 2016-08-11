@@ -222,23 +222,15 @@ static struct usage_help usage_help[] = {
 		"listen",
 		"listen on a network socket for trace clients",
 		" %s listen -p port[-D][-o file][-d dir][-l logfile]\n"
+		"    [--virt [--dom domain][-m permsion][-g group][-c cpu]]\n"
 		"          Creates a socket to listen for clients.\n"
 		"          -D create it in daemon mode.\n"
 		"          -o file name to use for clients.\n"
 		"          -d diretory to store client files.\n"
 		"	   -l logfile to write messages to.\n"
-	},
-	{
-		"virt-server",
-		"listen on a virtio-serial for trace clients",
-		" %s virt-server [-o file][-d dir][-l logfile]\n"
-		"                [--dom domain [-m permisson] [-g group] [-c cpu]]\n"
-		"          Creates a socket to listen for clients.\n"
-		"          -D create it in daemon mode.\n"
-		"          -o file name to use for clients.\n"
-		"          -d diretory to store client files.\n"
-		"	   -l logfile to write messages to.\n"
-		"          --dom create domain direcroty in /tmp/trace-cmd/virt and folling directory permissions/group names and FIFO files will be changed here\n"
+		"	--virt listen on a virtio-serial for trace clients\n"
+		"          --dom create domain direcroty in /tmp/trace-cmd/virt and folling directory\n"
+		"                permissions/group names and FIFO files will be changed here\n"
 		"	   -m changes the permission of domain directory.\n"
 		"	   -g changes group of domain directory.\n"
 		"	   -c creates trace data I/F(trace-path-cpu*.{in, out} files) in domain directory.\n"
