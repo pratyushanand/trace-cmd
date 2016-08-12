@@ -86,6 +86,7 @@ static int clear_function_filters;
 
 static char *host;
 static int sfd;
+static int psfd;
 static struct tracecmd_output *network_handle;
 
 /* Max size to let a per cpu file get */
@@ -2833,8 +2834,10 @@ again:
 	/* Now create the handle through this socket */
 	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events);
 
-	if (proto_ver == V2_PROTOCOL)
+	if (proto_ver == V2_PROTOCOL) {
+		psfd = sfd; /* used for closing */
 		tracecmd_msg_finish_sending_metadata(sfd);
+	}
 
 	/* OK, we are all set, let'r rip! */
 }
@@ -2851,20 +2854,21 @@ static void setup_virtio(void)
 
 	/* Now create the handle through this socket */
 	virt_handle = tracecmd_create_init_fd_glob(fd, listed_events);
+	psfd = fd; /* used for closing */
 	tracecmd_msg_finish_sending_metadata(fd);
 }
 
 static void finish_network(void)
 {
 	if (proto_ver == V2_PROTOCOL)
-		tracecmd_msg_send_close_msg();
+		tracecmd_msg_send_close_msg(psfd);
 	close(sfd);
 	free(host);
 }
 
 static void finish_virt(void)
 {
-	tracecmd_msg_send_close_msg();
+	tracecmd_msg_send_close_msg(psfd);
 	free(virt_handle);
 	free(virt_sfds);
 }

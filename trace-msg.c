@@ -70,7 +70,6 @@ bool use_tcp;
 int cpu_count;
 
 /* for client */
-static int psfd;
 unsigned int page_size;
 int *client_ports;
 int *virt_sfds;
@@ -734,9 +733,9 @@ int tracecmd_msg_send_port_array(int fd, int total_cpus, int *ports)
 	return 0;
 }
 
-void tracecmd_msg_send_close_msg(void)
+void tracecmd_msg_send_close_msg(int fd)
 {
-	tracecmd_msg_send(psfd, MSG_CLOSE);
+	tracecmd_msg_send(fd, MSG_CLOSE);
 }
 
 int tracecmd_msg_metadata_send(int fd, const char *buf, int size)
@@ -785,9 +784,6 @@ int tracecmd_msg_finish_sending_metadata(int fd)
 	ret = tracecmd_msg_send(fd, MSG_FINMETA);
 	if (ret < 0)
 		return ret;
-
-	/* psfd will be used for closing */
-	psfd = fd;
 	return 0;
 }
 

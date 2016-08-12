@@ -284,7 +284,7 @@ int tracecmd_msg_send_init_data_net(int fd);
 int tracecmd_msg_send_init_data_virt(int fd);
 int tracecmd_msg_metadata_send(int fd, const char *buf, int size);
 int tracecmd_msg_finish_sending_metadata(int fd);
-void tracecmd_msg_send_close_msg(void);
+void tracecmd_msg_send_close_msg(int fd);
 
 /* for server */
 int tracecmd_msg_set_connection(int fd, const char *domain);
