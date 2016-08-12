@@ -105,6 +105,10 @@ struct tracecmd_ftrace {
 	int long_size;
 };
 
+enum tracecmd_output_flags {
+	TRACECMD_OUTPUT_FL_METADATA	= 1,
+};
+
 struct tracecmd_input *tracecmd_alloc(const char *file);
 struct tracecmd_input *tracecmd_alloc_fd(int fd);
 struct tracecmd_input *tracecmd_open(const char *file);
@@ -230,7 +234,7 @@ tracecmd_create_init_file_glob(const char *output_file,
 			       struct tracecmd_event_list *list);
 struct tracecmd_output *tracecmd_create_init_fd(int fd);
 struct tracecmd_output *
-tracecmd_create_init_fd_glob(int fd, struct tracecmd_event_list *list);
+tracecmd_create_init_fd_glob(int fd, struct tracecmd_event_list *list, int flags);
 struct tracecmd_output *tracecmd_create_init_file(const char *output_file);
 struct tracecmd_output *tracecmd_create_init_file_override(const char *output_file,
 							   const char *tracing_dir,

@@ -2775,6 +2775,7 @@ static void setup_network(void)
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
 	int sfd, s;
+	int flags = 0;
 	char *server;
 	char *port;
 	char *p;
@@ -2826,13 +2827,14 @@ again:
 			goto again;
 		}
 		communicate_with_listener_v2_net(sfd);
+		flags = TRACECMD_OUTPUT_FL_METADATA;
 	}
 
 	if (proto_ver == V1_PROTOCOL)
 		communicate_with_listener_v1_net(sfd);
 
 	/* Now create the handle through this socket */
-	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events);
+	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events, flags);
 
 	if (proto_ver == V2_PROTOCOL) {
 		psfd = sfd; /* used for closing */
@@ -2853,7 +2855,8 @@ static void setup_virtio(void)
 	communicate_with_listener_virt(fd);
 
 	/* Now create the handle through this socket */
-	virt_handle = tracecmd_create_init_fd_glob(fd, listed_events);
+	virt_handle = tracecmd_create_init_fd_glob(fd, listed_events,
+						   TRACECMD_OUTPUT_FL_METADATA);
 	psfd = fd; /* used for closing */
 	tracecmd_msg_finish_sending_metadata(fd);
 }

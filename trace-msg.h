@@ -20,7 +20,6 @@ extern int cpu_count;
 /* for client */
 extern unsigned int page_size;
 extern int *client_ports;
-extern bool send_metadata;
 extern int *virt_sfds;
 
 /* for server */

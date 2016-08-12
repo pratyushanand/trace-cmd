@@ -73,7 +73,6 @@ int cpu_count;
 unsigned int page_size;
 int *client_ports;
 int *virt_sfds;
-bool send_metadata;
 
 /* for server */
 static int *port_array;
@@ -540,9 +539,6 @@ static int tracecmd_msg_send_init_data(int fd, bool net)
 			}
 		}
 	}
-
-	/* Next, send meta data */
-	send_metadata = true;
 
 	return 0;
 }
