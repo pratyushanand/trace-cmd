@@ -297,7 +297,7 @@ static int process_udp_child(int sfd, const char *host, const char *port,
 		if (n < 0) {
 			if (errno == EINTR)
 				continue;
-			pdie("reading client");
+			pdie("reading pages from client");
 		}
 		if (!n)
 			break;
@@ -599,12 +599,16 @@ static int communicate_with_client_virt(int fd, const char *domain,  int *cpus, 
 {
 	proto_ver = V2_PROTOCOL;
 
-	if (tracecmd_msg_set_connection(fd, domain) < 0)
+	if (tracecmd_msg_set_connection(fd, domain) < 0) {
+		plog("Failed connection to domain %s\n", domain);
 		return -1;
+	}
 
 	/* read the CPU count, the page size, and options */
-	if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0)
+	if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0) {
+		plog("Failed inital settings for domain %s\n", domain);
 		return -1;
+	}
 
 	return 0;
 }
@@ -696,8 +700,10 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 
 	if (proto_ver == V2_PROTOCOL) {
 		/* send set of port numbers to the client */
-		if (tracecmd_msg_send_port_array(fd, cpus, port_array) < 0)
+		if (tracecmd_msg_send_port_array(fd, cpus, port_array) < 0) {
+			plog("Failed sending port array\n");
 			goto out_free;
+		}
 	} else {
 		/* send the client a comma deliminated set of port numbers */
 		for (cpu = 0; cpu < cpus; cpu++) {
