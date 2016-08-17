@@ -72,8 +72,6 @@ int cpu_count;
 /* for client */
 unsigned int page_size;
 int *client_ports;
-int *virt_sfds;
-
 
 struct tracecmd_msg_server {
 	struct tracecmd_msg_handle handle;
@@ -565,18 +563,17 @@ tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 		return ret;
 
 	cpus = ntohl(msg.data.rinit.cpus);
+	client_ports = malloc_or_die(sizeof(int) * cpus);
 	if (net) {
-		client_ports = malloc_or_die(sizeof(int) * cpus);
 		for (i = 0; i < cpus; i++)
 			client_ports[i] = ntohl(msg.data.rinit.port_array[i]);
 	} else {
-		virt_sfds = malloc_or_die(sizeof(int) * cpus);
 
 		/* Open data paths of virtio-serial */
 		for (i = 0; i < cpus; i++) {
 			snprintf(path, PATH_MAX, TRACE_PATH_CPU, i);
-			virt_sfds[i] = open(path, O_WRONLY);
-			if (virt_sfds[i] < 0) {
+			client_ports[i] = open(path, O_WRONLY);
+			if (client_ports[i] < 0) {
 				warning("Cannot open %s", TRACE_PATH_CPU, i);
 				return -errno;
 			}

@@ -2604,10 +2604,9 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 	}
 
 	if (client_ports) {
-		connect_port(cpu);
-		recorder = tracecmd_create_recorder_fd(client_ports[cpu], cpu, recorder_flags);
-	} else if (virt_sfds) {
-		recorder = tracecmd_create_recorder_fd(virt_sfds[cpu], cpu,
+		if (!virt)
+			connect_port(cpu);
+		recorder = tracecmd_create_recorder_fd(client_ports[cpu], cpu,
 						       recorder_flags);
 	} else {
 		file = get_temp_file(instance, cpu);
@@ -2884,7 +2883,7 @@ static void finish_network(struct tracecmd_msg_handle *msg_handle)
 	if (proto_ver == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg(msg_handle);
 	tracecmd_msg_handle_close(msg_handle);
-	free(virt_sfds);
+	free(client_ports);
 	free(host);
 }
 
