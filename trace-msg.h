@@ -22,9 +22,6 @@ extern unsigned int page_size;
 extern int *client_ports;
 extern int *virt_sfds;
 
-/* for server */
-extern bool done;
-
 void plog(const char *fmt, ...);
 void pdie(const char *fmt, ...);
 

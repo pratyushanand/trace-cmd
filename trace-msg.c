@@ -74,9 +74,22 @@ unsigned int page_size;
 int *client_ports;
 int *virt_sfds;
 
-/* for server */
-static int *port_array;
-bool done;
+
+struct tracecmd_msg_server {
+	struct tracecmd_msg_handle handle;
+	int			*port_array;
+	int			done;
+};
+
+static struct tracecmd_msg_server *
+make_server(struct tracecmd_msg_handle *msg_handle)
+{
+	if (msg_handle->type != TRACECMD_MSG_SERVER) {
+		plog("Message handle not of type server\n");
+		return NULL;
+	}
+	return (struct tracecmd_msg_server *)msg_handle;
+}
 
 struct tracecmd_msg_opt {
 	be32 size;
@@ -214,27 +227,31 @@ static int make_tinit(struct tracecmd_msg *msg)
 	return 0;
 }
 
-static int make_rinit(struct tracecmd_msg *msg)
+static int make_rinit(struct tracecmd_msg_handle *msg_handle,
+		      struct tracecmd_msg *msg)
 {
+	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
 	int size = MIN_RINIT_SIZE;
+	int alloc_size;
 	be32 *ptr;
 	be32 port;
 	int i;
 
 	msg->data.rinit.cpus = htonl(cpu_count);
 
-	if (port_array) {
-		msg->data.rinit.port_array = malloc(sizeof(*port_array) * cpu_count);
+	if (msg_server->port_array) {
+		alloc_size = sizeof(*msg->data.rinit.port_array) * cpu_count;
+		msg->data.rinit.port_array = malloc(alloc_size);
 		if (!msg->data.rinit.port_array)
 			return -ENOMEM;
 
-		size += sizeof(*port_array) * cpu_count;
+		size += alloc_size;
 
 		ptr = msg->data.rinit.port_array;
 
 		for (i = 0; i < cpu_count; i++) {
 			/* + rrqports->cpus or rrqports->port_array[i] */
-			port = htonl(port_array[i]);
+			port = htonl(msg_server->port_array[i]);
 			*ptr = port;
 			ptr++;
 		}
@@ -268,7 +285,8 @@ static int make_error_msg(struct tracecmd_msg *msg)
 	return 0;
 }
 
-static int tracecmd_msg_create(u32 cmd, struct tracecmd_msg *msg)
+static int tracecmd_msg_create(struct tracecmd_msg_handle *msg_handle,
+			       u32 cmd, struct tracecmd_msg *msg)
 {
 	int ret = 0;
 
@@ -283,7 +301,7 @@ static int tracecmd_msg_create(u32 cmd, struct tracecmd_msg *msg)
 	case MSG_TINIT:
 		return make_tinit(msg);
 	case MSG_RINIT:
-		return make_rinit(msg);
+		return make_rinit(msg_handle, msg);
 	case MSG_TCONNECT:
 	case MSG_CLOSE:
 	case MSG_SENDMETA: /* meta data is not stored here. */
@@ -322,7 +340,7 @@ static int tracecmd_msg_send(struct tracecmd_msg_handle *msg_handle, u32 cmd)
 		return -EINVAL;
 	}
 
-	ret = tracecmd_msg_create(cmd, &msg);
+	ret = tracecmd_msg_create(msg_handle, cmd, &msg);
 	if (ret < 0)
 		return ret;
 
@@ -452,6 +470,20 @@ error:
 
 #define MSG_WAIT_MSEC	5000
 static int msg_wait_to = MSG_WAIT_MSEC;
+
+bool tracecmd_msg_done(struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
+
+	return (volatile int)msg_server->done;
+}
+
+void tracecmd_msg_set_done(struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
+
+	msg_server->done = true;
+}
 
 /*
  * A return value of 0 indicates time-out
@@ -610,8 +642,14 @@ struct tracecmd_msg_handle *
 tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type)
 {
 	struct tracecmd_msg_handle *handle;
+	int size;
 
-	handle = calloc(1, sizeof(struct tracecmd_msg_handle));
+	if (type == TRACECMD_MSG_SERVER)
+		size = sizeof(struct tracecmd_msg_server);
+	else
+		size = sizeof(struct tracecmd_msg_handle);
+
+	handle = calloc(1, size);
 	if (!handle)
 		return NULL;
 
@@ -751,10 +789,11 @@ error:
 int tracecmd_msg_send_port_array(struct tracecmd_msg_handle *msg_handle,
 				 int total_cpus, int *ports)
 {
+	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
 	int ret;
 
 	cpu_count = total_cpus;
-	port_array = ports;
+	msg_server->port_array = ports;
 
 	ret = tracecmd_msg_send(msg_handle, MSG_RINIT);
 	if (ret < 0)
@@ -776,7 +815,7 @@ int tracecmd_msg_metadata_send(struct tracecmd_msg_handle *msg_handle,
 	int ret;
 	int count = 0;
 
-	ret = tracecmd_msg_create(MSG_SENDMETA, &msg);
+	ret = tracecmd_msg_create(msg_handle, MSG_SENDMETA, &msg);
 	if (ret < 0)
 		return ret;
 
@@ -859,7 +898,7 @@ int tracecmd_msg_collect_metadata(struct tracecmd_msg_handle *msg_handle, int of
 	} while (cmd == MSG_SENDMETA);
 
 	/* check the finish message of the client */
-	while (!done) {
+	while (!tracecmd_msg_done(msg_handle)) {
 		ret = tracecmd_msg_recv(msg_handle, &msg);
 		if (ret < 0) {
 			warning("reading client");

@@ -67,6 +67,10 @@ static int proto_ver;
 
 static int do_daemon;
 
+/* Used for signaling INT to finish */
+static struct tracecmd_msg_handle *stop_msg_handle;
+static bool done;
+
 struct domain_dir {
 	struct domain_dir *next;
 	char *name;
@@ -177,6 +181,8 @@ static void finish(int sig)
 {
 	if (recorder)
 		tracecmd_stop_recording(recorder);
+	if (stop_msg_handle)
+		tracecmd_msg_set_done(stop_msg_handle);
 	done = true;
 }
 
@@ -726,10 +732,13 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 	return NULL;
 }
 
-static void collect_metadata_from_client(int ifd, int ofd)
+static void
+collect_metadata_from_client(struct tracecmd_msg_handle *msg_handle,
+			     int ofd)
 {
 	char buf[BUFSIZ];
 	int n, s, t;
+	int ifd = msg_handle->fd;
 
 	do {
 		n = read(ifd, buf, BUFSIZ);
@@ -750,7 +759,7 @@ static void collect_metadata_from_client(int ifd, int ofd)
 			t -= s;
 			s = n - t;
 		} while (t);
-	} while (n > 0 && !done);
+	} while (n > 0 && !tracecmd_msg_done(msg_handle));
 }
 
 static void stop_all_readers(int cpus, int *pid_array)
@@ -820,11 +829,14 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 	if (!pid_array)
 		return -ENOMEM;
 
+	/* on signal stop this msg */
+	stop_msg_handle = msg_handle;
+
 	/* Now we are ready to start reading data from the client */
 	if (proto_ver == V2_PROTOCOL)
 		tracecmd_msg_collect_metadata(msg_handle, ofd);
 	else
-		collect_metadata_from_client(msg_handle->fd, ofd);
+		collect_metadata_from_client(msg_handle, ofd);
 
 	/* wait a little to let our readers finish reading */
 	sleep(1);
