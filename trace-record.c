@@ -95,8 +95,6 @@ static bool virt;
 
 static int do_ptrace;
 
-static struct tracecmd_msg_handle *msg_handle;
-
 static int filter_task;
 static int filter_pid = -1;
 
@@ -2860,8 +2858,10 @@ static struct tracecmd_msg_handle *setup_virtio(void)
 	return communicate_with_listener_virt(fd);
 }
 
-static void setup_connection(void)
+static struct tracecmd_msg_handle *setup_connection(void)
 {
+	struct tracecmd_msg_handle *msg_handle;
+
 	if (host)
 		msg_handle = setup_network();
 	else
@@ -2876,32 +2876,33 @@ static void setup_connection(void)
 							      listed_events);
 
 	/* OK, we are all set, let'r rip! */
+	return msg_handle;
 }
 
-static void finish_network(void)
+static void finish_network(struct tracecmd_msg_handle *msg_handle)
 {
 	if (proto_ver == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg(msg_handle);
 	tracecmd_msg_handle_close(msg_handle);
+	free(virt_sfds);
 	free(host);
 }
 
-static void finish_virt(void)
-{
-	tracecmd_msg_send_close_msg(msg_handle);
-	free(virt_sfds);
-}
-
-static void start_threads(enum trace_type type, int global)
+static struct tracecmd_msg_handle *
+start_threads(enum trace_type type, int global)
 {
 	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	struct buffer_instance *instance;
+	struct tracecmd_msg_handle *msg_handle = NULL;
 	int *brass = NULL;
 	int i = 0;
 	int ret;
 
-	if (host || virt )
-		setup_connection();
+	if (host || virt ) {
+		msg_handle = setup_connection();
+		if (!msg_handle)
+			die("Failed to make connection");
+	}
 
 	/* make a thread for every CPU we have */
 	pids = malloc(sizeof(*pids) * cpu_count * (buffers + 1));
@@ -2938,6 +2939,7 @@ static void start_threads(enum trace_type type, int global)
 		}
 	}
 	recorder_threads = i;
+	return msg_handle;
 }
 
 static void append_buffer(struct tracecmd_output *handle,
@@ -3035,7 +3037,8 @@ enum {
 	DATA_FL_OFFSET		= 2,
 };
 
-static void record_data(char *date2ts, int flags)
+static void record_data(char *date2ts, int flags,
+			struct tracecmd_msg_handle *msg_handle)
 {
 	struct tracecmd_option **buffer_options;
 	struct tracecmd_output *handle;
@@ -3043,11 +3046,8 @@ static void record_data(char *date2ts, int flags)
 	char **temp_files;
 	int i;
 
-	if (host) {
-		finish_network();
-		return;
-	} else if (virt) {
-		finish_virt();
+	if (msg_handle) {
+		finish_network(msg_handle);
 		return;
 	}
 
@@ -4196,6 +4196,7 @@ void trace_record (int argc, char **argv)
 	struct event_list *event = NULL;
 	struct event_list *last_event = NULL;
 	struct buffer_instance *instance = &top_instance;
+	struct tracecmd_msg_handle *msg_handle = NULL;
 	enum trace_type type = 0;
 	char *pids;
 	char *pid;
@@ -4798,7 +4799,7 @@ void trace_record (int argc, char **argv)
 	if (type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM)) {
 		signal(SIGINT, finish);
 		if (!latency)
-			start_threads(type, global);
+			msg_handle = start_threads(type, global);
 	}
 
 	if (extract) {
@@ -4846,7 +4847,7 @@ void trace_record (int argc, char **argv)
 	}
 
 	if (record || extract) {
-		record_data(date2ts, data_flags);
+		record_data(date2ts, data_flags, msg_handle);
 		delete_thread_data();
 	} else
 		print_stats();
