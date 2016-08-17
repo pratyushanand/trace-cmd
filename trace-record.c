@@ -634,10 +634,11 @@ static void stop_threads(enum trace_type type)
 	}
 }
 
-static int create_recorder(struct buffer_instance *instance, int cpu,
+static int create_recorder(struct buffer_instance *instance,
+			   struct tracecmd_msg_handle *msg_handle, int cpu,
 			   enum trace_type type, int *brass);
 
-static void flush_threads(void)
+static void flush_threads(struct tracecmd_msg_handle *msg_handle)
 {
 	struct buffer_instance *instance;
 	long ret;
@@ -649,7 +650,8 @@ static void flush_threads(void)
 	for_all_instances(instance) {
 		for (i = 0; i < cpu_count; i++) {
 			/* Extract doesn't support sub buffers yet */
-			ret = create_recorder(instance, i, TRACE_TYPE_EXTRACT, NULL);
+			ret = create_recorder(instance, msg_handle, i,
+					      TRACE_TYPE_EXTRACT, NULL);
 			if (ret < 0)
 				die("error reading ring buffer");
 		}
@@ -2475,7 +2477,7 @@ static void flush(int sig)
 		tracecmd_stop_recording(recorder);
 }
 
-static void connect_port(int cpu)
+static void connect_port(int *client_ports, int cpu)
 {
 	struct addrinfo hints;
 	struct addrinfo *results, *rp;
@@ -2575,7 +2577,8 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
  * If extract is set, then this is going to set up the recorder,
  * connections and exit as the tracing is serialized by a single thread.
  */
-static int create_recorder(struct buffer_instance *instance, int cpu,
+static int create_recorder(struct buffer_instance *instance,
+			   struct tracecmd_msg_handle *msg_handle, int cpu,
 			   enum trace_type type, int *brass)
 {
 	long ret;
@@ -2583,7 +2586,7 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 	int pid;
 
 	/* network for buffer instances not supported yet */
-	if (client_ports && instance->name)
+	if (msg_handle && instance->name)
 		return 0;
 
 	if (type != TRACE_TYPE_EXTRACT) {
@@ -2603,9 +2606,11 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 		cpu_count = 0;
 	}
 
-	if (client_ports) {
+	if (msg_handle) {
+		int *client_ports = tracecmd_msg_get_client_ports(msg_handle);
+
 		if (!virt)
-			connect_port(cpu);
+			connect_port(client_ports, cpu);
 		recorder = tracecmd_create_recorder_fd(client_ports[cpu], cpu,
 						       recorder_flags);
 	} else {
@@ -2645,6 +2650,7 @@ static void check_first_msg_from_server(struct tracecmd_msg_handle *msg_handle)
 
 static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_handle)
 {
+	int *client_ports;
 	char buf[BUFSIZ];
 	ssize_t n;
 	int cpu, i;
@@ -2685,7 +2691,7 @@ static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_han
 		/* No options */
 		write(msg_handle->fd, "0", 2);
 
-	client_ports = malloc(sizeof(int) * cpu_count);
+	client_ports = tracecmd_msg_alloc_client_ports(msg_handle, cpu_count);
 	if (!client_ports)
 		die("Failed to allocate client ports for %d cpus", cpu_count);
 
@@ -2883,7 +2889,6 @@ static void finish_network(struct tracecmd_msg_handle *msg_handle)
 	if (proto_ver == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg(msg_handle);
 	tracecmd_msg_handle_close(msg_handle);
-	free(client_ports);
 	free(host);
 }
 
@@ -2930,7 +2935,8 @@ start_threads(enum trace_type type, int global)
 			pids[i].instance = instance;
 			/* Make sure all output is flushed before forking */
 			fflush(stdout);
-			pid = pids[i++].pid = create_recorder(instance, x, type, brass);
+			pid = pids[i++].pid = create_recorder(instance, msg_handle,
+							      x, type, brass);
 			if (brass)
 				close(brass[1]);
 			if (pid > 0)
@@ -4802,7 +4808,7 @@ void trace_record (int argc, char **argv)
 	}
 
 	if (extract) {
-		flush_threads();
+		flush_threads(msg_handle);
 
 	} else {
 		if (!(type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM))) {

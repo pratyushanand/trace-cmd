@@ -307,7 +307,9 @@ int tracecmd_msg_metadata_send(struct tracecmd_msg_handle *msg_handle,
 			       const char *buf, int size);
 int tracecmd_msg_finish_sending_metadata(struct tracecmd_msg_handle *msg_handle);
 void tracecmd_msg_send_close_msg(struct tracecmd_msg_handle *msg_handle);
-int *tracecmd_msg_get_client_ports(struct tracecmd_msg_handle *handle);
+int *tracecmd_msg_get_client_ports(struct tracecmd_msg_handle *msg_handle);
+int *tracecmd_msg_alloc_client_ports(struct tracecmd_msg_handle *msg_handle,
+				     int cpu_count);
 
 /* for server */
 int tracecmd_msg_set_connection(struct tracecmd_msg_handle *msg_handle,

@@ -17,9 +17,7 @@
 extern bool use_tcp;
 extern int cpu_count;
 
-/* for client */
 extern unsigned int page_size;
-extern int *client_ports;
 
 void plog(const char *fmt, ...);
 void pdie(const char *fmt, ...);

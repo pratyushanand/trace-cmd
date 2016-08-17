@@ -69,15 +69,28 @@ typedef __be32 be32;
 bool use_tcp;
 int cpu_count;
 
-/* for client */
 unsigned int page_size;
-int *client_ports;
+
+struct tracecmd_msg_client {
+	struct tracecmd_msg_handle handle;
+	int			*client_ports;
+};
 
 struct tracecmd_msg_server {
 	struct tracecmd_msg_handle handle;
 	int			*port_array;
 	int			done;
 };
+
+static struct tracecmd_msg_client *
+make_client(struct tracecmd_msg_handle *msg_handle)
+{
+	if (msg_handle->type != TRACECMD_MSG_CLIENT) {
+		plog("Message handle not of type client");
+		return NULL;
+	}
+	return (struct tracecmd_msg_client *)msg_handle;
+}
 
 static struct tracecmd_msg_server *
 make_server(struct tracecmd_msg_handle *msg_handle)
@@ -180,6 +193,22 @@ static ssize_t msg_do_write_check(struct tracecmd_msg_handle *msg_handle,
 	}
 
 	return ret;
+}
+
+int *tracecmd_msg_get_client_ports(struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_msg_client *msg_client = make_client(msg_handle);
+
+	return msg_client->client_ports;
+}
+
+int *tracecmd_msg_alloc_client_ports(struct tracecmd_msg_handle *msg_handle,
+				     int cpu_count)
+{
+	struct tracecmd_msg_client *msg_client = make_client(msg_handle);
+
+	msg_client->client_ports = malloc(sizeof(int) * cpu_count);
+	return msg_client->client_ports;
 }
 
 static int make_data(const char *buf, int buflen, struct tracecmd_msg *msg)
@@ -553,6 +582,7 @@ tracecmd_msg_send_and_wait_for_msg(struct tracecmd_msg_handle *msg_handle,
 static int
 tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 {
+	struct tracecmd_msg_client *msg_client = make_client(msg_handle);
 	struct tracecmd_msg msg;
 	char path[PATH_MAX];
 	int i, cpus;
@@ -562,18 +592,24 @@ tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 	if (ret < 0)
 		return ret;
 
+	if (msg_client->client_ports) {
+		plog("msg_client already has ports defined");
+		return -EINVAL;
+	}
+
 	cpus = ntohl(msg.data.rinit.cpus);
-	client_ports = malloc_or_die(sizeof(int) * cpus);
+	msg_client->client_ports = malloc_or_die(sizeof(int) * cpus);
 	if (net) {
 		for (i = 0; i < cpus; i++)
-			client_ports[i] = ntohl(msg.data.rinit.port_array[i]);
+			msg_client->client_ports[i] =
+				ntohl(msg.data.rinit.port_array[i]);
 	} else {
 
 		/* Open data paths of virtio-serial */
 		for (i = 0; i < cpus; i++) {
 			snprintf(path, PATH_MAX, TRACE_PATH_CPU, i);
-			client_ports[i] = open(path, O_WRONLY);
-			if (client_ports[i] < 0) {
+			msg_client->client_ports[i] = open(path, O_WRONLY);
+			if (msg_client->client_ports[i] < 0) {
 				warning("Cannot open %s", TRACE_PATH_CPU, i);
 				return -errno;
 			}
@@ -643,6 +679,8 @@ tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type)
 
 	if (type == TRACECMD_MSG_SERVER)
 		size = sizeof(struct tracecmd_msg_server);
+	else if (type == TRACECMD_MSG_CLIENT)
+		size = sizeof(struct tracecmd_msg_client);
 	else
 		size = sizeof(struct tracecmd_msg_handle);
 
@@ -658,6 +696,8 @@ tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type)
 void tracecmd_msg_handle_close(struct tracecmd_msg_handle *msg_handle)
 {
 	close(msg_handle->fd);
+	if (msg_handle->type == TRACECMD_MSG_CLIENT)
+		free(((struct tracecmd_msg_client *)msg_handle)->client_ports);
 	free(msg_handle);
 }
 
