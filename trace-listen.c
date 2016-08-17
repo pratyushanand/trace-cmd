@@ -457,7 +457,8 @@ static int open_virtio_serial_pipe(int *pid, int cpu, int pagesize,
 	return fd;
 }
 
-static int communicate_with_client_net(int fd, int *cpus, int *pagesize)
+static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
+				       int *cpus, int *pagesize)
 {
 	char *last_proto = NULL;
 	char buf[BUFSIZ];
@@ -466,6 +467,7 @@ static int communicate_with_client_net(int fd, int *cpus, int *pagesize)
 	int size;
 	int n, s, t, i;
 	int ret = -EINVAL;
+	int fd = msg_handle->fd;
 
 	/* Let the client know what we are */
 	write(fd, "tracecmd", 8);
@@ -520,7 +522,7 @@ static int communicate_with_client_net(int fd, int *cpus, int *pagesize)
 		proto_ver = V2_PROTOCOL;
 
 		/* read the CPU count, the page size, and options */
-		if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0)
+		if (tracecmd_msg_initial_setting(msg_handle, cpus, pagesize) < 0)
 			goto out;
 	} else {
 		/* The client is using the v1 protocol */
@@ -595,17 +597,19 @@ static int communicate_with_client_net(int fd, int *cpus, int *pagesize)
 	return ret;
 }
 
-static int communicate_with_client_virt(int fd, const char *domain,  int *cpus, int *pagesize)
+static int
+communicate_with_client_virt(struct tracecmd_msg_handle *msg_handle,
+			     const char *domain,  int *cpus, int *pagesize)
 {
 	proto_ver = V2_PROTOCOL;
 
-	if (tracecmd_msg_set_connection(fd, domain) < 0) {
+	if (tracecmd_msg_set_connection(msg_handle, domain) < 0) {
 		plog("Failed connection to domain %s\n", domain);
 		return -1;
 	}
 
 	/* read the CPU count, the page size, and options */
-	if (tracecmd_msg_initial_setting(fd, cpus, pagesize) < 0) {
+	if (tracecmd_msg_initial_setting(msg_handle, cpus, pagesize) < 0) {
 		plog("Failed inital settings for domain %s\n", domain);
 		return -1;
 	}
@@ -652,7 +656,7 @@ static void destroy_all_readers(int cpus, int *pid_array, const char *node,
 
 static int *create_all_readers(int cpus, const char *node, const char *port,
 			       const char *domain, int virtpid, int pagesize,
-			       int fd, int mode)
+			       struct tracecmd_msg_handle *msg_handle, int mode)
 {
 	char buf[BUFSIZ];
 	int *port_array = NULL;
@@ -700,7 +704,7 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 
 	if (proto_ver == V2_PROTOCOL) {
 		/* send set of port numbers to the client */
-		if (tracecmd_msg_send_port_array(fd, cpus, port_array) < 0) {
+		if (tracecmd_msg_send_port_array(msg_handle, cpus, port_array) < 0) {
 			plog("Failed sending port array\n");
 			goto out_free;
 		}
@@ -709,10 +713,10 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 		for (cpu = 0; cpu < cpus; cpu++) {
 			snprintf(buf, BUFSIZ, "%s%d",
 				 cpu ? "," : "", port_array[cpu]);
-			write(fd, buf, strlen(buf));
+			write(msg_handle->fd, buf, strlen(buf));
 		}
 		/* end with null terminator */
-		write(fd, "\0", 1);
+		write(msg_handle->fd, "\0", 1);
 	}
 
 	return pid_array;
@@ -789,7 +793,8 @@ static int put_together_file(int cpus, int ofd, const char *node,
 	return ret;
 }
 
-static int process_client(int fd, const char *node, const char *port,
+static int process_client(struct tracecmd_msg_handle *msg_handle,
+			  const char *node, const char *port,
 			   const char *domain, int virtpid, int mode)
 {
 	int *pid_array;
@@ -799,11 +804,11 @@ static int process_client(int fd, const char *node, const char *port,
 	int ret;
 
 	if (mode == NET) {
-		ret = communicate_with_client_net(fd, &cpus, &pagesize);
+		ret = communicate_with_client_net(msg_handle, &cpus, &pagesize);
 		if (ret < 0)
 			return ret;
 	} else if (mode == VIRT) {
-		ret = communicate_with_client_virt(fd, domain, &cpus, &pagesize);
+		ret = communicate_with_client_virt(msg_handle, domain, &cpus, &pagesize);
 		if (ret < 0)
 			return ret;
 	} else
@@ -811,15 +816,15 @@ static int process_client(int fd, const char *node, const char *port,
 
 	ofd = create_client_file(node, port, domain, virtpid, mode);
 	pid_array = create_all_readers(cpus, node, port, domain, virtpid,
-				       pagesize, fd, mode);
+				       pagesize, msg_handle, mode);
 	if (!pid_array)
 		return -ENOMEM;
 
 	/* Now we are ready to start reading data from the client */
 	if (proto_ver == V2_PROTOCOL)
-		tracecmd_msg_collect_metadata(fd, ofd);
+		tracecmd_msg_collect_metadata(msg_handle, ofd);
 	else
-		collect_metadata_from_client(fd, ofd);
+		collect_metadata_from_client(msg_handle->fd, ofd);
 
 	/* wait a little to let our readers finish reading */
 	sleep(1);
@@ -837,18 +842,20 @@ static int process_client(int fd, const char *node, const char *port,
 	return ret;
 }
 
-static int process_client_net(int fd, const char *node, const char *port)
+static int process_client_net(struct tracecmd_msg_handle *msg_handle,
+			      const char *node, const char *port)
 {
-	return process_client(fd, node, port, NULL, 0, NET);
+	return process_client(msg_handle, node, port, NULL, 0, NET);
 }
 
-static int process_client_virt(int fd, const char *domain, int virtpid)
+static int process_client_virt(struct tracecmd_msg_handle *msg_handle,
+			       const char *domain, int virtpid)
 {
 	int ret;
 
 	/* keep connection to qemu if clients on guests finish operation */
 	do {
-		ret = process_client(fd, NULL, NULL, domain, virtpid, VIRT);
+		ret = process_client(msg_handle, NULL, NULL, domain, virtpid, VIRT);
 	} while (!done && !ret);
 
 	return ret;
@@ -1016,6 +1023,7 @@ static char *get_guest_domain_from_pid(int pid)
 static int do_connection(int cfd, struct sockaddr *peer_addr,
 			 socklen_t peer_addr_len, int mode)
 {
+	struct tracecmd_msg_handle *msg_handle;
 	char host[NI_MAXHOST], service[NI_MAXSERV];
 	int s, ret, virtpid;
 	char *domain = NULL;
@@ -1035,6 +1043,8 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 	if (ret)
 		return ret;
 
+	msg_handle = tracecmd_msg_handle_alloc(cfd, TRACECMD_MSG_SERVER);
+
 	if (mode == NET) {
 		s = getnameinfo(peer_addr, peer_addr_len, host, NI_MAXHOST,
 				service, NI_MAXSERV, NI_NUMERICSERV);
@@ -1048,11 +1058,11 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 			close(cfd);
 			return -1;
 		}
-		process_client_net(cfd, host, service);
+		process_client_net(msg_handle, host, service);
 	} else if (mode == VIRT)
-		process_client_virt(cfd, domain, virtpid);
+		process_client_virt(msg_handle, domain, virtpid);
 
-	close(cfd);
+	tracecmd_msg_handle_close(msg_handle);
 
 	if (!debug)
 		exit(0);

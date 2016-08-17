@@ -86,16 +86,16 @@ static int clear_function_filters;
 
 static char *host;
 static int sfd;
-static int psfd;
 static struct tracecmd_output *network_handle;
 
 /* Max size to let a per cpu file get */
 static int max_kb;
 
-struct tracecmd_output *virt_handle;
 static bool virt;
 
 static int do_ptrace;
+
+static struct tracecmd_msg_handle *msg_handle;
 
 static int filter_task;
 static int filter_pid = -1;
@@ -2635,36 +2635,36 @@ static int create_recorder(struct buffer_instance *instance, int cpu,
 	exit(0);
 }
 
-static void check_first_msg_from_server(int fd)
+static void check_first_msg_from_server(struct tracecmd_msg_handle *msg_handle)
 {
 	char buf[BUFSIZ];
 
-	read(fd, buf, 8);
+	read(msg_handle->fd, buf, 8);
 
 	/* Make sure the server is the tracecmd server */
 	if (memcmp(buf, "tracecmd", 8) != 0)
 		die("server not tracecmd server");
 }
 
-static void communicate_with_listener_v1_net(int fd)
+static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_handle)
 {
 	char buf[BUFSIZ];
 	ssize_t n;
 	int cpu, i;
 
-	check_first_msg_from_server(fd);
+	check_first_msg_from_server(msg_handle);
 
 	/* write the number of CPUs we have (in ASCII) */
 	sprintf(buf, "%d", cpu_count);
 
 	/* include \0 */
-	write(fd, buf, strlen(buf)+1);
+	write(msg_handle->fd, buf, strlen(buf)+1);
 
 	/* write the pagesize (in ASCII) */
 	sprintf(buf, "%d", page_size);
 
 	/* include \0 */
-	write(fd, buf, strlen(buf)+1);
+	write(msg_handle->fd, buf, strlen(buf)+1);
 
 	/*
 	 * If we are using IPV4 and our page size is greater than
@@ -2679,14 +2679,14 @@ static void communicate_with_listener_v1_net(int fd)
 
 	if (use_tcp) {
 		/* Send one option */
-		write(fd, "1", 2);
+		write(msg_handle->fd, "1", 2);
 		/* Size 4 */
-		write(fd, "4", 2);
+		write(msg_handle->fd, "4", 2);
 		/* use TCP */
-		write(fd, "TCP", 4);
+		write(msg_handle->fd, "TCP", 4);
 	} else
 		/* No options */
-		write(fd, "0", 2);
+		write(msg_handle->fd, "0", 2);
 
 	client_ports = malloc(sizeof(int) * cpu_count);
 	if (!client_ports)
@@ -2698,7 +2698,7 @@ static void communicate_with_listener_v1_net(int fd)
 	 */
 	for (cpu = 0; cpu < cpu_count; cpu++) {
 		for (i = 0; i < BUFSIZ; i++) {
-			n = read(fd, buf+i, 1);
+			n = read(msg_handle->fd, buf+i, 1);
 			if (n != 1)
 				die("Error, reading server ports");
 			if (!buf[i] || buf[i] == ',')
@@ -2711,18 +2711,19 @@ static void communicate_with_listener_v1_net(int fd)
 	}
 }
 
-static void communicate_with_listener_v2_net(int fd)
+static void communicate_with_listener_v2_net(struct tracecmd_msg_handle *msg_handle)
 {
-	if (tracecmd_msg_send_init_data_net(fd) < 0)
+	if (tracecmd_msg_send_init_data_net(msg_handle) < 0)
 		die("Cannot communicate with server");
 }
 
-static void check_protocol_version(int fd)
+static void check_protocol_version(struct tracecmd_msg_handle *msg_handle)
 {
 	char buf[BUFSIZ];
+	int fd = msg_handle->fd;
 	int n;
 
-	check_first_msg_from_server(fd);
+	check_first_msg_from_server(msg_handle);
 
 	/*
 	 * Write the protocol version, the magic number, and the dummy
@@ -2761,21 +2762,30 @@ static void check_protocol_version(int fd)
 	}
 }
 
-static void communicate_with_listener_virt(int fd)
+static struct tracecmd_msg_handle *
+communicate_with_listener_virt(int fd)
 {
-	if (tracecmd_msg_connect_to_server(fd) < 0)
+	struct tracecmd_msg_handle *msg_handle;
+
+	msg_handle = tracecmd_msg_handle_alloc(fd, TRACECMD_MSG_CLIENT);
+	if (!msg_handle)
+		die("Failed to allocate message handle");
+
+	if (tracecmd_msg_connect_to_server(msg_handle) < 0)
 		die("Cannot communicate with server");
 
-	if (tracecmd_msg_send_init_data_virt(fd) < 0)
+	if (tracecmd_msg_send_init_data_virt(msg_handle) < 0)
 		die("Cannot send init data");
+
+	return msg_handle;
 }
 
-static void setup_network(void)
+static struct tracecmd_msg_handle *setup_network(void)
 {
+	struct tracecmd_msg_handle *msg_handle;
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
 	int sfd, s;
-	int flags = 0;
 	char *server;
 	char *port;
 	char *p;
@@ -2819,32 +2829,27 @@ again:
 
 	freeaddrinfo(result);
 
+	msg_handle = tracecmd_msg_handle_alloc(sfd, TRACECMD_MSG_CLIENT);
+	if (!msg_handle)
+		die("Failed to allocate message handle");
+
 	if (proto_ver == V2_PROTOCOL) {
-		check_protocol_version(sfd);
+		check_protocol_version(msg_handle);
 		if (proto_ver == V1_PROTOCOL) {
 			/* reconnect to the server for using the v1 protocol */
 			close(sfd);
 			goto again;
 		}
-		communicate_with_listener_v2_net(sfd);
-		flags = TRACECMD_OUTPUT_FL_METADATA;
+		communicate_with_listener_v2_net(msg_handle);
 	}
 
 	if (proto_ver == V1_PROTOCOL)
-		communicate_with_listener_v1_net(sfd);
+		communicate_with_listener_v1_net(msg_handle);
 
-	/* Now create the handle through this socket */
-	network_handle = tracecmd_create_init_fd_glob(sfd, listed_events, flags);
-
-	if (proto_ver == V2_PROTOCOL) {
-		psfd = sfd; /* used for closing */
-		tracecmd_msg_finish_sending_metadata(sfd);
-	}
-
-	/* OK, we are all set, let'r rip! */
+	return msg_handle;
 }
 
-static void setup_virtio(void)
+static struct tracecmd_msg_handle *setup_virtio(void)
 {
 	int fd;
 
@@ -2852,27 +2857,38 @@ static void setup_virtio(void)
 	if (fd < 0)
 		die("Cannot open %s", AGENT_CTL_PATH);
 
-	communicate_with_listener_virt(fd);
+	return communicate_with_listener_virt(fd);
+}
+
+static void setup_connection(void)
+{
+	if (host)
+		msg_handle = setup_network();
+	else
+		msg_handle = setup_virtio();
 
 	/* Now create the handle through this socket */
-	virt_handle = tracecmd_create_init_fd_glob(fd, listed_events,
-						   TRACECMD_OUTPUT_FL_METADATA);
-	psfd = fd; /* used for closing */
-	tracecmd_msg_finish_sending_metadata(fd);
+	if (proto_ver == V2_PROTOCOL) {
+		network_handle = tracecmd_create_init_fd_msg(msg_handle, listed_events);
+		tracecmd_msg_finish_sending_metadata(msg_handle);
+	} else
+		network_handle = tracecmd_create_init_fd_glob(msg_handle->fd,
+							      listed_events);
+
+	/* OK, we are all set, let'r rip! */
 }
 
 static void finish_network(void)
 {
 	if (proto_ver == V2_PROTOCOL)
-		tracecmd_msg_send_close_msg(psfd);
-	close(sfd);
+		tracecmd_msg_send_close_msg(msg_handle);
+	tracecmd_msg_handle_close(msg_handle);
 	free(host);
 }
 
 static void finish_virt(void)
 {
-	tracecmd_msg_send_close_msg(psfd);
-	free(virt_handle);
+	tracecmd_msg_send_close_msg(msg_handle);
 	free(virt_sfds);
 }
 
@@ -2884,10 +2900,8 @@ static void start_threads(enum trace_type type, int global)
 	int i = 0;
 	int ret;
 
-	if (host)
-		setup_network();
-	else if (virt)
-		setup_virtio();
+	if (host || virt )
+		setup_connection();
 
 	/* make a thread for every CPU we have */
 	pids = malloc(sizeof(*pids) * cpu_count * (buffers + 1));
@@ -4857,7 +4871,7 @@ void trace_record (int argc, char **argv)
 			write_tracing_on(instance, instance->tracing_on_init_val);
 	}
 
-	if (host)
+	if (host || virt)
 		tracecmd_output_close(network_handle);
 
 	if (profile)

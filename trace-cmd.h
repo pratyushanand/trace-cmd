@@ -105,10 +105,6 @@ struct tracecmd_ftrace {
 	int long_size;
 };
 
-enum tracecmd_output_flags {
-	TRACECMD_OUTPUT_FL_METADATA	= 1,
-};
-
 struct tracecmd_input *tracecmd_alloc(const char *file);
 struct tracecmd_input *tracecmd_alloc_fd(int fd);
 struct tracecmd_input *tracecmd_open(const char *file);
@@ -221,6 +217,7 @@ struct tracecmd_event_list {
 };
 
 struct tracecmd_option;
+struct tracecmd_msg_handle;
 
 struct tracecmd_output *tracecmd_create_file_latency(const char *output_file, int cpus);
 struct tracecmd_output *tracecmd_create_file(const char *output_file,
@@ -234,7 +231,10 @@ tracecmd_create_init_file_glob(const char *output_file,
 			       struct tracecmd_event_list *list);
 struct tracecmd_output *tracecmd_create_init_fd(int fd);
 struct tracecmd_output *
-tracecmd_create_init_fd_glob(int fd, struct tracecmd_event_list *list, int flags);
+tracecmd_create_init_fd_glob(int fd, struct tracecmd_event_list *list);
+struct tracecmd_output *
+tracecmd_create_init_fd_msg(struct tracecmd_msg_handle *msg_handle,
+			    struct tracecmd_event_list *list);
 struct tracecmd_output *tracecmd_create_init_file(const char *output_file);
 struct tracecmd_output *tracecmd_create_init_file_override(const char *output_file,
 							   const char *tracing_dir,
@@ -282,19 +282,41 @@ void tracecmd_stat_cpu(struct trace_seq *s, int cpu);
 long tracecmd_flush_recording(struct tracecmd_recorder *recorder);
 void tracecmd_filter_pid(int pid, int exclude);
 
+enum tracecmd_msg_type {
+	TRACECMD_MSG_CLIENT		= 1,
+	TRACECMD_MSG_SERVER		= 2,
+};
+
+/* for both client and server */
+struct tracecmd_msg_handle {
+	int			fd;
+	enum tracecmd_msg_type	type;
+};
+
+struct tracecmd_msg_handle *
+  tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type);
+
+/* Closes the socket and frees the handle */
+void tracecmd_msg_handle_close(struct tracecmd_msg_handle *msg_handle);
+
 /* for clients */
-int tracecmd_msg_connect_to_server(int fd);
-int tracecmd_msg_send_init_data_net(int fd);
-int tracecmd_msg_send_init_data_virt(int fd);
-int tracecmd_msg_metadata_send(int fd, const char *buf, int size);
-int tracecmd_msg_finish_sending_metadata(int fd);
-void tracecmd_msg_send_close_msg(int fd);
+int tracecmd_msg_connect_to_server(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_send_init_data_net(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_send_init_data_virt(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_metadata_send(struct tracecmd_msg_handle *msg_handle,
+			       const char *buf, int size);
+int tracecmd_msg_finish_sending_metadata(struct tracecmd_msg_handle *msg_handle);
+void tracecmd_msg_send_close_msg(struct tracecmd_msg_handle *msg_handle);
+int *tracecmd_msg_get_client_ports(struct tracecmd_msg_handle *handle);
 
 /* for server */
-int tracecmd_msg_set_connection(int fd, const char *domain);
-int tracecmd_msg_initial_setting(int fd, int *cpus, int *pagesize);
-int tracecmd_msg_send_port_array(int fd, int total_cpus, int *ports);
-int tracecmd_msg_collect_metadata(int ifd, int ofd);
+int tracecmd_msg_set_connection(struct tracecmd_msg_handle *msg_handle,
+				const char *domain);
+int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
+				 int *cpus, int *pagesize);
+int tracecmd_msg_send_port_array(struct tracecmd_msg_handle *msg_handle,
+				 int total_cpus, int *ports);
+int tracecmd_msg_collect_metadata(struct tracecmd_msg_handle *msg_handle, int ofd);
 
 /* --- Plugin handling --- */
 extern struct pevent_plugin_option trace_ftrace_options[];
