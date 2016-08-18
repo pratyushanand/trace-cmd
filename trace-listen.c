@@ -527,9 +527,6 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 
 		proto_ver = V2_PROTOCOL;
 
-		/* read the CPU count, the page size, and options */
-		if (tracecmd_msg_initial_setting(msg_handle, cpus, pagesize) < 0)
-			goto out;
 	} else {
 		/* The client is using the v1 protocol */
 
@@ -605,18 +602,12 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 
 static int
 communicate_with_client_virt(struct tracecmd_msg_handle *msg_handle,
-			     const char *domain,  int *cpus, int *pagesize)
+			     const char *domain)
 {
 	proto_ver = V2_PROTOCOL;
 
 	if (tracecmd_msg_set_connection(msg_handle, domain) < 0) {
 		plog("Failed connection to domain %s\n", domain);
-		return -1;
-	}
-
-	/* read the CPU count, the page size, and options */
-	if (tracecmd_msg_initial_setting(msg_handle, cpus, pagesize) < 0) {
-		plog("Failed inital settings for domain %s\n", domain);
 		return -1;
 	}
 
@@ -817,11 +808,18 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 		if (ret < 0)
 			return ret;
 	} else if (mode == VIRT) {
-		ret = communicate_with_client_virt(msg_handle, domain, &cpus, &pagesize);
+		ret = communicate_with_client_virt(msg_handle, domain);
 		if (ret < 0)
 			return ret;
 	} else
 		return -EINVAL;
+
+	/* read the CPU count, the page size, and options */
+	if ((proto_ver == V2_PROTOCOL) &&
+	    tracecmd_msg_initial_setting(msg_handle, &cpus, &pagesize) < 0) {
+		plog("Failed inital settings\n");
+		return -EINVAL;
+	}
 
 	ofd = create_client_file(node, port, domain, virtpid, mode);
 	pid_array = create_all_readers(cpus, node, port, domain, virtpid,
