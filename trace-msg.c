@@ -532,53 +532,6 @@ static int tracecmd_msg_recv_wait(struct tracecmd_msg_handle *msg_handle,
 	return tracecmd_msg_recv(msg_handle, msg);
 }
 
-static int tracecmd_msg_wait_for_msg(struct tracecmd_msg_handle *msg_handle,
-				     struct tracecmd_msg *msg)
-{
-	u32 cmd;
-	int ret;
-
-	ret = tracecmd_msg_recv_wait(msg_handle, msg);
-	if (ret < 0) {
-		if (ret == -ETIMEDOUT)
-			warning("Connection timed out\n");
-		return ret;
-	}
-
-	cmd = ntohl(msg->cmd);
-	switch (cmd) {
-	case MSG_RCONNECT:
-		/* Make sure the server is the tracecmd server */
-		if (memcmp(msg->data.data.buf, CONNECTION_MSG,
-			   ntohl(msg->data.data.size) - 1) != 0) {
-			warning("server not tracecmd server");
-			return -EPROTONOSUPPORT;
-		}
-		break;
-	case MSG_CLOSE:
-		return -ECONNABORTED;
-	}
-
-	return 0;
-}
-
-static int
-tracecmd_msg_send_and_wait_for_msg(struct tracecmd_msg_handle *msg_handle,
-				    u32 cmd, struct tracecmd_msg *msg)
-{
-	int ret;
-
-	ret = tracecmd_msg_send(msg_handle, cmd);
-	if (ret < 0)
-		return ret;
-
-	ret = tracecmd_msg_wait_for_msg(msg_handle, msg);
-	if (ret < 0)
-		return ret;
-
-	return 0;
-}
-
 static int
 tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 {
@@ -587,10 +540,24 @@ tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 	char path[PATH_MAX];
 	int i, cpus;
 	int ret;
+	u32 cmd;
 
-	ret = tracecmd_msg_send_and_wait_for_msg(msg_handle, MSG_TINIT, &msg);
+	ret = tracecmd_msg_send(msg_handle, MSG_TINIT);
 	if (ret < 0)
 		return ret;
+
+	ret = tracecmd_msg_recv_wait(msg_handle, &msg);
+	if (ret < 0) {
+		if (ret == -ETIMEDOUT)
+			warning("Connection timed out\n");
+		return ret;
+	}
+
+	cmd = ntohl(msg.cmd);
+	if (cmd != MSG_RINIT) {
+		warning("Expected RINIT and received %d\n", cmd);
+		return -EINVAL;
+	}
 
 	if (msg_client->client_ports) {
 		plog("msg_client already has ports defined");
@@ -632,13 +599,33 @@ int tracecmd_msg_send_init_data_virt(struct tracecmd_msg_handle *msg_handle)
 int tracecmd_msg_connect_to_server(struct tracecmd_msg_handle *msg_handle)
 {
 	struct tracecmd_msg msg;
+	u32 cmd;
 	int ret;
 
 	/* connect to a server */
-	ret = tracecmd_msg_send_and_wait_for_msg(msg_handle, MSG_TCONNECT, &msg);
+	ret = tracecmd_msg_send(msg_handle, MSG_TCONNECT);
+	if (ret < 0)
+		return ret;
+
+	ret = tracecmd_msg_recv_wait(msg_handle, &msg);
 	if (ret < 0) {
-		if (ret == -EPROTONOSUPPORT)
+		if (ret != -ETIMEDOUT)
 			goto error;
+		warning("Connection timed out\n");
+		return ret;
+	}
+
+	cmd = ntohl(msg.cmd);
+	if (cmd != MSG_RCONNECT) {
+		warning("expected to received RCONNECT but received %d\n", cmd);
+		goto error;
+	}
+
+	/* Make sure the server is the tracecmd server */
+	if (memcmp(msg.data.data.buf, CONNECTION_MSG,
+		   ntohl(msg.data.data.size) - 1) != 0) {
+		warning("server not tracecmd server");
+		return -EPROTONOSUPPORT;
 	}
 
 	return ret;
@@ -732,7 +719,7 @@ int tracecmd_msg_set_connection(struct tracecmd_msg_handle *msg_handle,
 	if (cmd == MSG_CLOSE)
 		return -ECONNABORTED;
 	else if (cmd != MSG_TCONNECT)
-		return -EINVAL;
+		return -EPROTONOSUPPORT;
 
 	ret = tracecmd_msg_send(msg_handle, MSG_RCONNECT);
 	if (ret < 0)
