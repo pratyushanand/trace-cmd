@@ -568,8 +568,7 @@ static int tracecmd_msg_recv_wait(struct tracecmd_msg_handle *msg_handle,
 	return tracecmd_msg_recv(msg_handle, msg);
 }
 
-static int
-tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
+int tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle)
 {
 	struct tracecmd_msg_client *msg_client = make_client(msg_handle);
 	struct tracecmd_msg msg;
@@ -602,11 +601,11 @@ tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 
 	cpus = ntohl(msg.data.rinit.cpus);
 	msg_client->client_ports = malloc_or_die(sizeof(int) * cpus);
-	if (net) {
+	if (msg_handle->flags & TRACECMD_MSG_FL_NETWORK) {
 		for (i = 0; i < cpus; i++)
 			msg_client->client_ports[i] =
 				ntohl(msg.data.rinit.port_array[i]);
-	} else {
+	} else if (msg_handle->flags & TRACECMD_MSG_FL_VIRT) {
 
 		/* Open data paths of virtio-serial */
 		for (i = 0; i < cpus; i++) {
@@ -617,19 +616,12 @@ tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle, bool net)
 				return -errno;
 			}
 		}
+	} else {
+		plog("Neither virt or network specified");
+		return -EINVAL;
 	}
 
 	return 0;
-}
-
-int tracecmd_msg_send_init_data_net(struct tracecmd_msg_handle *msg_handle)
-{
-	return tracecmd_msg_send_init_data(msg_handle, true);
-}
-
-int tracecmd_msg_send_init_data_virt(struct tracecmd_msg_handle *msg_handle)
-{
-	return tracecmd_msg_send_init_data(msg_handle, false);
 }
 
 int tracecmd_msg_connect_to_server(struct tracecmd_msg_handle *msg_handle)
