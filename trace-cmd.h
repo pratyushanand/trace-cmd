@@ -282,19 +282,24 @@ void tracecmd_stat_cpu(struct trace_seq *s, int cpu);
 long tracecmd_flush_recording(struct tracecmd_recorder *recorder);
 void tracecmd_filter_pid(int pid, int exclude);
 
-enum tracecmd_msg_type {
-	TRACECMD_MSG_CLIENT		= 1,
-	TRACECMD_MSG_SERVER		= 2,
+enum tracecmd_msg_bits {
+	TRACECMD_MSG_BIT_CLIENT		= 0,
+	TRACECMD_MSG_BIT_SERVER		= 1,
+};
+
+enum tracecmd_msg_flags {
+	TRACECMD_MSG_FL_CLIENT		= (1 << TRACECMD_MSG_BIT_CLIENT),
+	TRACECMD_MSG_FL_SERVER		= (1 << TRACECMD_MSG_BIT_SERVER),
 };
 
 /* for both client and server */
 struct tracecmd_msg_handle {
 	int			fd;
-	enum tracecmd_msg_type	type;
+	unsigned long		flags;
 };
 
 struct tracecmd_msg_handle *
-  tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type);
+  tracecmd_msg_handle_alloc(int fd, unsigned long flags);
 
 /* Closes the socket and frees the handle */
 void tracecmd_msg_handle_close(struct tracecmd_msg_handle *msg_handle);

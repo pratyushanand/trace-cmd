@@ -28,6 +28,7 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
@@ -40,6 +41,18 @@
 
 typedef __u32 u32;
 typedef __be32 be32;
+
+static inline void dprint(const char *fmt, ...)
+{
+	va_list ap;
+
+	if (!debug)
+		return;
+
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+}
 
 /* Two (4k) pages is the max transfer for now */
 #define MSG_MAX_LEN			8192
@@ -85,7 +98,7 @@ struct tracecmd_msg_server {
 static struct tracecmd_msg_client *
 make_client(struct tracecmd_msg_handle *msg_handle)
 {
-	if (msg_handle->type != TRACECMD_MSG_CLIENT) {
+	if (!(msg_handle->flags & TRACECMD_MSG_FL_CLIENT)) {
 		plog("Message handle not of type client");
 		return NULL;
 	}
@@ -95,7 +108,7 @@ make_client(struct tracecmd_msg_handle *msg_handle)
 static struct tracecmd_msg_server *
 make_server(struct tracecmd_msg_handle *msg_handle)
 {
-	if (msg_handle->type != TRACECMD_MSG_SERVER) {
+	if (!(msg_handle->flags & TRACECMD_MSG_FL_SERVER)) {
 		plog("Message handle not of type server\n");
 		return NULL;
 	}
@@ -134,17 +147,36 @@ struct tracecmd_msg_error {
 	} data;
 } __attribute__((packed));
 
+#define MSG_NAMES \
+	C(CLOSE)				\
+	C(TCONNECT)				\
+	C(RCONNECT)				\
+	C(TINIT)				\
+	C(RINIT)				\
+	C(SENDMETA)				\
+	C(FINMETA)
+
+#undef C
+#define C(a)	MSG_##a,
+
 enum tracecmd_msg_cmd {
 	MSG_ERROR	= 0,
-	MSG_CLOSE	= 1,
-	MSG_TCONNECT	= 2,
-	MSG_RCONNECT	= 3,
-	MSG_TINIT	= 4,
-	MSG_RINIT	= 5,
-	MSG_SENDMETA	= 6,
-	MSG_FINMETA	= 7,
+	MSG_NAMES
 	MSG_MAX
 };
+
+#undef C
+#define C(a)	#a,
+
+static const char *msg_names[] = {
+	"ERROR", MSG_NAMES "MAX" };
+
+static const char *cmd_to_name(int cmd)
+{
+	if (cmd < MSG_MAX)
+		return msg_names[cmd];
+	return "Unkown";
+}
 
 struct tracecmd_msg {
 	be32 size;
@@ -371,6 +403,8 @@ static int tracecmd_msg_send(struct tracecmd_msg_handle *msg_handle, u32 cmd)
 	if (ret < 0)
 		return ret;
 
+	dprint("msg send: %d (%s)\n", cmd, cmd_to_name(cmd));
+
 	ret = msg_do_write_check(msg_handle, &msg);
 	if (ret < 0)
 		ret = -ECOMM;
@@ -478,6 +512,8 @@ static int tracecmd_msg_recv(struct tracecmd_msg_handle *msg_handle,
 	ret = msg_read(fd, msg, MSG_HDR_LEN, &n);
 	if (ret < 0)
 		return ret;
+
+	dprint("msg received: %d (%s)\n", ntohl(msg->cmd), cmd_to_name(ntohl(msg->cmd)));
 
 	size = ntohl(msg->size);
 	if (size > MSG_MAX_LEN)
@@ -659,14 +695,14 @@ static void error_operation_for_server(struct tracecmd_msg *msg)
 }
 
 struct tracecmd_msg_handle *
-tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type)
+tracecmd_msg_handle_alloc(int fd, unsigned long flags)
 {
 	struct tracecmd_msg_handle *handle;
 	int size;
 
-	if (type == TRACECMD_MSG_SERVER)
+	if (flags & TRACECMD_MSG_FL_SERVER)
 		size = sizeof(struct tracecmd_msg_server);
-	else if (type == TRACECMD_MSG_CLIENT)
+	else if (flags & TRACECMD_MSG_FL_CLIENT)
 		size = sizeof(struct tracecmd_msg_client);
 	else
 		size = sizeof(struct tracecmd_msg_handle);
@@ -676,14 +712,14 @@ tracecmd_msg_handle_alloc(int fd, enum tracecmd_msg_type type)
 		return NULL;
 
 	handle->fd = fd;
-	handle->type = type;
+	handle->flags = flags;
 	return handle;
 }
 
 void tracecmd_msg_handle_close(struct tracecmd_msg_handle *msg_handle)
 {
 	close(msg_handle->fd);
-	if (msg_handle->type == TRACECMD_MSG_CLIENT)
+	if (msg_handle->flags & TRACECMD_MSG_FL_CLIENT)
 		free(((struct tracecmd_msg_client *)msg_handle)->client_ports);
 	free(msg_handle);
 }

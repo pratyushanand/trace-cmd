@@ -2770,7 +2770,7 @@ communicate_with_listener_virt(int fd)
 {
 	struct tracecmd_msg_handle *msg_handle;
 
-	msg_handle = tracecmd_msg_handle_alloc(fd, TRACECMD_MSG_CLIENT);
+	msg_handle = tracecmd_msg_handle_alloc(fd, TRACECMD_MSG_FL_CLIENT);
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
@@ -2832,7 +2832,7 @@ again:
 
 	freeaddrinfo(result);
 
-	msg_handle = tracecmd_msg_handle_alloc(sfd, TRACECMD_MSG_CLIENT);
+	msg_handle = tracecmd_msg_handle_alloc(sfd, TRACECMD_MSG_FL_CLIENT);
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
