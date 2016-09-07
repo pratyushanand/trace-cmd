@@ -76,7 +76,7 @@ Here, an example is written as follows:
    Add the following tags to domain XML files.
    # virsh edit guest1
    <channel type='unix'>
-      <source mode='connect' path='VAR_DIR/lib/trace-cmd/virt/agent-ctl-path'/>
+      <source mode='connect' path='/var/run/trace-cmd/agent-ctl-path'/>
       <target type='virtio' name='agent-ctl-path'/>
    </channel>
    <channel type='pipe'>
