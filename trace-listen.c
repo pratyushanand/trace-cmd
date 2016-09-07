@@ -45,7 +45,7 @@
 #define _VAR_DIR_Q(dir)		#dir
 #define VAR_DIR_Q(dir)		_VAR_DIR_Q(dir)
 
-#define VAR_RUN_DIR		VAR_DIR_Q(VAR_DIR) "/run"
+#define VAR_RUN_DIR		"/var/run"
 #define VAR_LIB_DIR		VAR_DIR_Q(VAR_DIR) "/lib"
 #define TRACE_CMD_DIR		VAR_LIB_DIR "/trace-cmd/"
 #define TRACE_CMD_RUN_DIR	VAR_RUN_DIR "/trace-cmd/"
