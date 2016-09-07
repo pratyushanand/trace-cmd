@@ -67,6 +67,8 @@ static int proto_ver;
 
 static int do_daemon;
 
+static int unlink_sock;
+
 /* Used for signaling INT to finish */
 static struct tracecmd_msg_handle *stop_msg_handle;
 static bool done;
@@ -890,6 +892,8 @@ static int do_fork(int cfd)
 		return pid;
 	}
 
+	unlink_sock = 0;
+
 	signal_setup(SIGINT, finish);
 
 	return 0;
@@ -1363,6 +1367,13 @@ static void make_virt_if_dir(void)
 		make_domain_dirs();
 }
 
+static void remove_sock(void)
+{
+	if (unlink_sock)
+		unlink(VIRT_TRACE_CTL_SOCK);
+	unlink_sock = 0;
+}
+
 static int set_up_virt(void)
 {
 	struct sockaddr_un un_server;
@@ -1382,6 +1393,8 @@ static int set_up_virt(void)
 
 	if (bind(sfd, (struct sockaddr *)&un_server, slen) < 0)
 		pdie("bind");
+	unlink_sock = 1;
+
 	chmod(VIRT_TRACE_CTL_SOCK, 0660);
 	group = getgrnam("qemu");
 	if (chown(VIRT_TRACE_CTL_SOCK, -1, group->gr_gid) < 0)
@@ -1397,8 +1410,7 @@ static void do_listen(int nfd, int vfd)
 {
 	do_accept_loop(nfd, vfd);
 
-	if (vfd >= 0)
-		unlink(VIRT_TRACE_CTL_SOCK);
+	remove_sock();
 
 	kill_clients();
 	remove_pid_file();
@@ -1552,8 +1564,10 @@ void trace_listen(int argc, char **argv)
 	if (port)
 		nfd = set_up_net(port);
 
-	if (virt)
+	if (virt) {
+		atexit(remove_sock);
 		vfd = set_up_virt();
+	}
 
 	do_listen(nfd, vfd);
 
