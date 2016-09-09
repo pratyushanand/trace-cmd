@@ -287,6 +287,7 @@ enum tracecmd_msg_bits {
 	TRACECMD_MSG_BIT_SERVER		= 1,
 	TRACECMD_MSG_BIT_NETWORK	= 2,
 	TRACECMD_MSG_BIT_VIRT		= 3,
+	TRACECMD_MSG_BIT_USE_TCP	= 4,
 };
 
 enum tracecmd_msg_flags {
@@ -294,11 +295,13 @@ enum tracecmd_msg_flags {
 	TRACECMD_MSG_FL_SERVER		= (1 << TRACECMD_MSG_BIT_SERVER),
 	TRACECMD_MSG_FL_NETWORK		= (1 << TRACECMD_MSG_BIT_NETWORK),
 	TRACECMD_MSG_FL_VIRT		= (1 << TRACECMD_MSG_BIT_VIRT),
+	TRACECMD_MSG_FL_USE_TCP		= (1 << TRACECMD_MSG_BIT_USE_TCP),
 };
 
 /* for both client and server */
 struct tracecmd_msg_handle {
 	int			fd;
+	int			cpu_count;
 	unsigned long		flags;
 };
 

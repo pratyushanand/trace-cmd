@@ -168,11 +168,11 @@ static int read_string(int fd, char *buf, size_t size)
 	return i;
 }
 
-static int process_option(char *option)
+static int process_option(struct tracecmd_msg_handle *msg_handle, char *option)
 {
 	/* currently the only option we have is to us TCP */
 	if (strcmp(option, "TCP") == 0) {
-		use_tcp = 1;
+		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 		return 1;
 	}
 	return 0;
@@ -266,7 +266,7 @@ void pdie(const char *fmt, ...)
 }
 
 static int process_udp_child(int sfd, const char *host, const char *port,
-			     int cpu, int page_size)
+			     int cpu, int page_size, int use_tcp)
 {
 	struct sockaddr_storage peer_addr;
 	socklen_t peer_addr_len;
@@ -326,7 +326,7 @@ static int process_udp_child(int sfd, const char *host, const char *port,
 #define SLEEP_DEFAULT	1000
 
 static int process_virt_child(int fd, int cpu, int pagesize,
-			       const char *domain, int virtpid)
+			      const char *domain, int virtpid)
 {
 	char *tempfile;
 
@@ -350,7 +350,7 @@ static int process_virt_child(int fd, int cpu, int pagesize,
 #define START_PORT_SEARCH 1500
 #define MAX_PORT_SEARCH 6000
 
-static int udp_bind_a_port(int start_port, int *sfd)
+static int udp_bind_a_port(int start_port, int *sfd, int use_tcp)
 {
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
@@ -396,7 +396,7 @@ static int udp_bind_a_port(int start_port, int *sfd)
 
 static void fork_reader(int sfd, const char *node, const char *port,
 			int *pid, int cpu, int pagesize, const char *domain,
-			int virtpid, int mode)
+			int virtpid, int use_tcp, int mode)
 {
 	int ret;
 
@@ -407,7 +407,7 @@ static void fork_reader(int sfd, const char *node, const char *port,
 
 	if (!*pid) {
 		if (mode == NET)
-			ret = process_udp_child(sfd, node, port, cpu, pagesize);
+			ret = process_udp_child(sfd, node, port, cpu, pagesize, use_tcp);
 		else if (mode == VIRT)
 			ret = process_virt_child(sfd, cpu, pagesize, domain, virtpid);
 		if (ret < 0)
@@ -418,19 +418,19 @@ static void fork_reader(int sfd, const char *node, const char *port,
 }
 
 static void fork_udp_reader(int sfd, const char *node, const char *port,
-			    int *pid, int cpu, int pagesize)
+			    int *pid, int cpu, int pagesize, int use_tcp)
 {
-	fork_reader(sfd, node, port, pid, cpu, pagesize, NULL, 0, NET);
+	fork_reader(sfd, node, port, pid, cpu, pagesize, NULL, 0, use_tcp, NET);
 }
 
 static void fork_virt_reader(int sfd, int *pid, int cpu, int pagesize,
 			     const char *domain, int virtpid)
 {
-	fork_reader(sfd, NULL, NULL, pid, cpu, pagesize, domain, virtpid, VIRT);
+	fork_reader(sfd, NULL, NULL, pid, cpu, pagesize, domain, virtpid, 0, VIRT);
 }
 
 static int open_udp(const char *node, const char *port, int *pid,
-		    int cpu, int pagesize, int start_port)
+		    int cpu, int pagesize, int start_port, int use_tcp)
 {
 	int sfd;
 	int num_port;
@@ -439,11 +439,11 @@ static int open_udp(const char *node, const char *port, int *pid,
 	 * udp_bind_a_port() currently does not return an error, but if that
 	 * changes in the future, we have a check for it now.
 	 */
-	num_port = udp_bind_a_port(start_port, &sfd);
+	num_port = udp_bind_a_port(start_port, &sfd, use_tcp);
 	if (num_port < 0)
 		return num_port;
 
-	fork_udp_reader(sfd, node, port, pid, cpu, pagesize);
+	fork_udp_reader(sfd, node, port, pid, cpu, pagesize, use_tcp);
 
 	return num_port;
 }
@@ -584,7 +584,7 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 				s = size - t;
 			} while (t);
 
-			s = process_option(option);
+			s = process_option(msg_handle, option);
 			free(option);
 			/* do we understand this option? */
 			ret = -EINVAL;
@@ -593,7 +593,7 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 		}
 	}
 
-	if (use_tcp)
+	if (msg_handle->flags & TRACECMD_MSG_FL_USE_TCP)
 		plog("Using TCP for live connection\n");
 
 	ret = 0;
@@ -658,6 +658,7 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 			       const char *domain, int virtpid, int pagesize,
 			       struct tracecmd_msg_handle *msg_handle, int mode)
 {
+	int use_tcp = msg_handle->flags & TRACECMD_MSG_FL_USE_TCP;
 	char buf[BUFSIZ];
 	int *port_array = NULL;
 	int *pid_array;
@@ -685,7 +686,7 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 	for (cpu = 0; cpu < cpus; cpu++) {
 		if (node) {
 			udp_port = open_udp(node, port, &pid, cpu,
-					    pagesize, start_port);
+					    pagesize, start_port, use_tcp);
 			if (udp_port < 0)
 				goto out_free;
 			port_array[cpu] = udp_port;

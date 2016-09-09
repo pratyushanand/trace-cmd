@@ -78,10 +78,6 @@ static inline void dprint(const char *fmt, ...)
 #define CONNECTION_MSG		"tracecmd-" MSG_VERSION
 #define CONNECTION_MSGSIZE	sizeof(CONNECTION_MSG)
 
-/* for both client and server */
-bool use_tcp;
-int cpu_count;
-
 unsigned int page_size;
 
 struct tracecmd_msg_client {
@@ -260,13 +256,14 @@ enum msg_opt_command {
 	MSGOPT_USETCP = 1,
 };
 
-static int make_tinit(struct tracecmd_msg *msg)
+static int make_tinit(struct tracecmd_msg_handle *msg_handle,
+		      struct tracecmd_msg *msg)
 {
 	struct tracecmd_msg_opt *opt;
 	int opt_num = 0;
 	int size = MIN_TINIT_SIZE;
 
-	if (use_tcp) {
+	if (msg_handle->flags & TRACECMD_MSG_FL_USE_TCP) {
 		opt_num++;
 		opt = malloc(sizeof(*opt));
 		if (!opt)
@@ -277,7 +274,7 @@ static int make_tinit(struct tracecmd_msg *msg)
 		size += sizeof(*opt);
 	}
 
-	msg->data.tinit.cpus = htonl(cpu_count);
+	msg->data.tinit.cpus = htonl(msg_handle->cpu_count);
 	msg->data.tinit.page_size = htonl(page_size);
 	msg->data.tinit.opt_num = htonl(opt_num);
 
@@ -290,6 +287,7 @@ static int make_rinit(struct tracecmd_msg_handle *msg_handle,
 		      struct tracecmd_msg *msg)
 {
 	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
+	int cpu_count = msg_handle->cpu_count;
 	int size = MIN_RINIT_SIZE;
 	int alloc_size;
 	be32 *ptr;
@@ -358,7 +356,7 @@ static int tracecmd_msg_create(struct tracecmd_msg_handle *msg_handle,
 	case MSG_RCONNECT:
 		return make_data(CONNECTION_MSG, CONNECTION_MSGSIZE, msg);
 	case MSG_TINIT:
-		return make_tinit(msg);
+		return make_tinit(msg_handle, msg);
 	case MSG_RINIT:
 		return make_rinit(msg_handle, msg);
 	case MSG_TCONNECT:
@@ -663,11 +661,12 @@ error:
 	return ret;
 }
 
-static bool process_option(struct tracecmd_msg_opt *opt)
+static bool process_option(struct tracecmd_msg_handle *msg_handle,
+			   struct tracecmd_msg_opt *opt)
 {
 	/* currently the only option we have is to us TCP */
 	if (ntohl(opt->opt_cmd) == MSGOPT_USETCP) {
-		use_tcp = true;
+		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 		return true;
 	}
 	return false;
@@ -821,7 +820,7 @@ int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
 			ret = -EINVAL;
 			goto error;
 		}
-		s = process_option(opt);
+		s = process_option(msg_handle, opt);
 		/* do we understand this option? */
 		if (!s) {
 			plog("Cannot understand(%d:%d:%d)\n",
@@ -844,7 +843,7 @@ int tracecmd_msg_send_port_array(struct tracecmd_msg_handle *msg_handle,
 	struct tracecmd_msg_server *msg_server = make_server(msg_handle);
 	int ret;
 
-	cpu_count = total_cpus;
+	msg_handle->cpu_count = total_cpus;
 	msg_server->port_array = ports;
 
 	ret = tracecmd_msg_send(msg_handle, MSG_RINIT);

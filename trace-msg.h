@@ -13,10 +13,6 @@
 #define V1_PROTOCOL	1
 #define V2_PROTOCOL	2
 
-/* for both client and server */
-extern bool use_tcp;
-extern int cpu_count;
-
 extern unsigned int page_size;
 
 void plog(const char *fmt, ...);

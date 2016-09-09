@@ -92,11 +92,14 @@ static struct tracecmd_output *network_handle;
 static int max_kb;
 
 static bool virt;
+static bool use_tcp;
 
 static int do_ptrace;
 
 static int filter_task;
 static int filter_pid = -1;
+
+static int cpu_count;
 
 static int finished;
 
@@ -2678,6 +2681,7 @@ static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_han
 	if (page_size >= UDP_MAX_PACKET) {
 		warning("page size too big for UDP using TCP in live read");
 		use_tcp = 1;
+		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 	}
 
 	if (use_tcp) {
@@ -2769,6 +2773,8 @@ communicate_with_listener_virt(int fd)
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
+	msg_handle->cpu_count = cpu_count;
+
 	if (tracecmd_msg_connect_to_server(msg_handle) < 0)
 		die("Cannot communicate with server");
 
@@ -2828,6 +2834,11 @@ again:
 					       TRACECMD_MSG_FL_NETWORK);
 	if (!msg_handle)
 		die("Failed to allocate message handle");
+
+	msg_handle->cpu_count = cpu_count;
+
+	if (use_tcp)
+		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 
 	if (proto_ver == V2_PROTOCOL) {
 		check_protocol_version(msg_handle);
