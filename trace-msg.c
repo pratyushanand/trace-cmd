@@ -761,11 +761,11 @@ error:
 
 #define MAX_OPTION_SIZE 4096
 
-int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
-				 int *pagesize)
+int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle)
 {
 	struct tracecmd_msg_opt *opt;
 	struct tracecmd_msg msg;
+	int pagesize;
 	int options, i, s;
 	int cpus;
 	int ret;
@@ -795,9 +795,9 @@ int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
 
 	msg_handle->cpu_count = cpus;
 
-	*pagesize = ntohl(msg.data.tinit.page_size);
-	plog("pagesize=%d\n", *pagesize);
-	if (*pagesize <= 0) {
+	pagesize = ntohl(msg.data.tinit.page_size);
+	plog("pagesize=%d\n", pagesize);
+	if (pagesize <= 0) {
 		ret = -EINVAL;
 		goto error;
 	}
@@ -833,7 +833,7 @@ int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
 		}
 	}
 
-	return 0;
+	return pagesize;
 
 error:
 	error_operation_for_server(&msg);

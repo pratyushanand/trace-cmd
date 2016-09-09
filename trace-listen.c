@@ -464,12 +464,12 @@ static int open_virtio_serial_pipe(int *pid, int cpu, int pagesize,
 	return fd;
 }
 
-static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
-				       int *pagesize)
+static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle)
 {
 	char *last_proto = NULL;
 	char buf[BUFSIZ];
 	char *option;
+	int pagesize = 0;
 	int options;
 	int size;
 	int cpus;
@@ -544,10 +544,10 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 			/** ERROR **/
 			goto out;
 
-		*pagesize = atoi(buf);
+		pagesize = atoi(buf);
 
-		plog("pagesize=%d\n", *pagesize);
-		if (*pagesize <= 0)
+		plog("pagesize=%d\n", pagesize);
+		if (pagesize <= 0)
 			goto out;
 
 		/* Now the number of options */
@@ -597,7 +597,7 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 	if (msg_handle->flags & TRACECMD_MSG_FL_USE_TCP)
 		plog("Using TCP for live connection\n");
 
-	ret = 0;
+	ret = pagesize;
  out:
 	free(last_proto);
 
@@ -668,6 +668,9 @@ static int *create_all_readers(const char *node, const char *port,
 	int cpus = msg_handle->cpu_count;
 	int cpu;
 	int pid;
+
+	if (!pagesize)
+		return NULL;
 
 	if (mode == NET) {
 		port_array = malloc(sizeof(int) * cpus);
@@ -804,15 +807,15 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 			   const char *domain, int virtpid, int mode)
 {
 	int *pid_array;
-	int pagesize;
+	int pagesize = 0;
 	int cpus;
 	int ofd;
 	int ret;
 
 	if (mode == NET) {
-		ret = communicate_with_client_net(msg_handle, &pagesize);
-		if (ret < 0)
-			return ret;
+		pagesize = communicate_with_client_net(msg_handle);
+		if (pagesize < 0)
+			return pagesize;
 	} else if (mode == VIRT) {
 		ret = communicate_with_client_virt(msg_handle, domain);
 		if (ret < 0)
@@ -822,7 +825,7 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 
 	/* read the CPU count, the page size, and options */
 	if ((msg_handle->version == V2_PROTOCOL) &&
-	    tracecmd_msg_initial_setting(msg_handle, &pagesize) < 0) {
+	    (pagesize = tracecmd_msg_initial_setting(msg_handle)) < 0) {
 		plog("Failed inital settings\n");
 		return -EINVAL;
 	}

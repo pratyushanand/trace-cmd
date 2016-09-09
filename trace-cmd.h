@@ -326,8 +326,7 @@ int *tracecmd_msg_alloc_client_ports(struct tracecmd_msg_handle *msg_handle,
 /* for server */
 int tracecmd_msg_set_connection(struct tracecmd_msg_handle *msg_handle,
 				const char *domain);
-int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle,
-				 int *pagesize);
+int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle);
 int tracecmd_msg_send_port_array(struct tracecmd_msg_handle *msg_handle,
 				 int *ports);
 int tracecmd_msg_collect_metadata(struct tracecmd_msg_handle *msg_handle, int ofd);
