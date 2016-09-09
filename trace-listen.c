@@ -1056,12 +1056,6 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 	int s, ret;
 	int pagesize;
 
-	ret = do_fork();
-	if (ret) {
-		close(cfd);
-		return ret;
-	}
-
 	msg_handle = tracecmd_msg_handle_alloc(cfd, TRACECMD_MSG_FL_SERVER);
 
 	ret = -EINVAL;
@@ -1084,15 +1078,22 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 
 	pagesize = communicate_with_client(msg_handle, domain, mode);
 
+	if (pagesize <= 0)
+		return -EINVAL;
+
+	ret = do_fork();
+	if (ret) {
+		close (cfd);
+		return ret;
+	}
+
 	ret = -EINVAL;
-	if (pagesize < 0)
-		goto out;
 
 	if (mode == NET)
 		ret = process_client_net(msg_handle, domain, service, pagesize);
 	else if (mode == VIRT)
 		ret = process_client_virt(msg_handle, domain, virtpid, pagesize);
- out:
+
 	tracecmd_msg_handle_close(msg_handle);
 
 	if (!debug)
