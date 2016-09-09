@@ -872,17 +872,10 @@ static int process_client_net(struct tracecmd_msg_handle *msg_handle,
 static int process_client_virt(struct tracecmd_msg_handle *msg_handle,
 			       const char *domain, int virtpid)
 {
-	int ret;
-
-	/* keep connection to qemu if clients on guests finish operation */
-	do {
-		ret = process_client(msg_handle, NULL, NULL, domain, virtpid, VIRT);
-	} while (!done && !ret);
-
-	return ret;
+	return process_client(msg_handle, NULL, NULL, domain, virtpid, VIRT);
 }
 
-static int do_fork(int cfd)
+static int do_fork(void)
 {
 	pid_t pid;
 
@@ -896,10 +889,8 @@ static int do_fork(int cfd)
 		return -1;
 	}
 
-	if (pid > 0) {
-		close(cfd);
+	if (pid > 0)
 		return pid;
-	}
 
 	unlink_sock = 0;
 
@@ -1044,27 +1035,18 @@ static char *get_guest_domain_from_pid(int pid)
 }
 
 static int do_connection(int cfd, struct sockaddr *peer_addr,
-			 socklen_t peer_addr_len, int mode)
+			 socklen_t peer_addr_len, const char *domain,
+			 int virtpid, int mode)
 {
 	struct tracecmd_msg_handle *msg_handle;
 	char host[NI_MAXHOST], service[NI_MAXSERV];
-	int s, ret, virtpid;
-	char *domain = NULL;
+	int s, ret;
 
-	if (mode == VIRT) {
-		virtpid = get_virtpid(cfd);
-		if (virtpid < 0)
-			return virtpid;
-
-		domain = get_guest_domain_from_pid(virtpid);
-		if (!domain)
-			return -1;
-		plog("start %s:%d\n", domain, virtpid);
-	}
-
-	ret = do_fork(cfd);
-	if (ret)
+	ret = do_fork();
+	if (ret) {
+		close(cfd);
 		return ret;
+	}
 
 	msg_handle = tracecmd_msg_handle_alloc(cfd, TRACECMD_MSG_FL_SERVER);
 
@@ -1166,25 +1148,58 @@ static void clean_up(void)
 	} while (ret > 0);
 }
 
+enum {
+	FD_NET		= 0,
+	FD_VIRT		= 1,
+	FD_CONNECTED,
+};
+
+struct client_list {
+	const char	*name;
+	int		pid;
+};
+
+static struct client_list *
+add_client(struct client_list *clients, int nr, const char *domain, int virtpid)
+{
+	nr -= FD_CONNECTED;
+
+	clients = realloc(clients, sizeof(*clients) * (nr + 1));
+	if (!clients)
+		return NULL;
+
+	clients[nr].name = domain;
+	clients[nr].pid = virtpid;
+
+	return clients;
+}
+
 static void do_accept_loop(int nfd, int vfd)
 {
+	struct client_list *clients = NULL;
+	struct client_list *client;
 	struct sockaddr addr;
 	socklen_t addrlen;
-	struct pollfd fds[2];
+	struct pollfd *fds;
+	char *domain = NULL;
+	int nr_fds = 2;
+	int virtpid;
 	int cfd, pid;
 	int ret;
 	int i;
 
-	memset(fds, 0, sizeof(fds));
+	fds = calloc(nr_fds, sizeof(struct pollfd));
+	if (!fds)
+		pdie("allocating fds");
 
-	fds[0].fd = nfd;
-	fds[0].events = POLLIN;
+	fds[FD_NET].fd = nfd;
+	fds[FD_NET].events = POLLIN;
 
-	fds[1].fd = vfd;
-	fds[1].events = POLLIN;
+	fds[FD_VIRT].fd = vfd;
+	fds[FD_VIRT].events = POLLIN;
 
 	do {
-		ret = poll(fds, 2, -1);
+		ret = poll(fds, nr_fds, -1);
 
 		if (ret < 0) {
 			if (errno == EINTR) {
@@ -1197,33 +1212,104 @@ static void do_accept_loop(int nfd, int vfd)
 		if (!ret)
 			continue;
 
-		for (i = 0; i < 2; i++) {
+		for (i = 0; i < nr_fds; i++) {
 
 			if (!fds[i].revents & POLLIN)
 				continue;
 
-			if (i == 0)
-				addrlen = sizeof(struct sockaddr_storage);
-			else
-				addrlen = sizeof(struct sockaddr_un);
+			if (i < FD_CONNECTED) {
+				if (i == FD_NET)
+					addrlen = sizeof(struct sockaddr_storage);
+				else
+					addrlen = sizeof(struct sockaddr_un);
 
-			cfd = accept(fds[i].fd, &addr, &addrlen);
-			printf("connected!\n");
-			if (cfd < 0 && errno == EINTR)
-				continue;
-			if (cfd < 0)
-				pdie("connecting");
+				cfd = accept(fds[i].fd, &addr, &addrlen);
+				printf("connected!\n");
+				if (cfd < 0 && errno == EINTR)
+					continue;
+				if (cfd < 0)
+					pdie("connecting");
 
-			if (i == 0)
-				pid = do_connection(cfd, &addr, addrlen, NET);
+				/*
+				 * The virt server connects when the machine
+				 * boots up. But doesn't expect to do any
+				 * tracing yet. Just add it to the poll list.
+				 */
+				if (i == FD_VIRT) {
+					void *new;
+
+					virtpid = get_virtpid(cfd);
+					if (virtpid < 0) {
+						plog("Unable to get virt pid\n");
+						close(cfd);
+						continue;
+					}
+
+					domain = get_guest_domain_from_pid(virtpid);
+					if (!domain) {
+						plog("Unable to get domain name from pid %d\n",
+						     virtpid);
+						close(cfd);
+						continue;
+					}
+
+					new = add_client(clients, nr_fds,
+							 domain, virtpid);
+					if (!new) {
+						plog("Failed to allocate client for %s:%d\n",
+						     domain, virtpid);
+						continue;
+					}
+					clients = new;
+
+					plog("start %s:%d\n", domain, virtpid);
+
+					new = realloc(fds, sizeof(*fds) * (nr_fds + 1));
+					if (!new) {
+						plog("Failed to allocate for new connection for %s", domain);
+						close(cfd);
+						continue;
+					}
+					fds = new;
+
+					memset(&fds[nr_fds], 0, sizeof(*fds));
+					fds[nr_fds].fd = cfd;
+					fds[nr_fds].events = POLLIN;
+					nr_fds++;
+
+					continue;
+				} else {
+					virtpid = 0;
+					domain = NULL;
+				}
+			} else {
+				cfd = dup(fds[i].fd);
+				if (cfd < 0) {
+					plog("Failed to dup fd");
+					continue;
+				}
+				client = &clients[i - FD_CONNECTED];
+			}
+
+			if (i == FD_NET)
+				pid = do_connection(cfd, &addr, addrlen, NULL, 0, NET);
 			else
-				pid = do_connection(cfd, NULL, 0, VIRT);
+				pid = do_connection(cfd, NULL, 0,
+						    client->name,
+						    client->pid, VIRT);
+
 			if (pid > 0)
 				add_process(pid);
 		}
 	} while (!done);
+
 	/* Get any final stragglers */
 	clean_up();
+
+	for (i = 0; i < nr_fds; i++)
+		close(fds[i].fd);
+
+	free(fds);
 }
 
 static void make_pid_file(void)
