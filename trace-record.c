@@ -111,7 +111,6 @@ static unsigned recorder_flags;
 /* Try a few times to get an accurate date */
 static int date2ts_tries = 5;
 
-static int proto_ver = V2_PROTOCOL;
 static struct func_list *graph_funcs;
 
 static int func_stack;
@@ -2745,7 +2744,7 @@ static void check_protocol_version(struct tracecmd_msg_handle *msg_handle)
 
 	if (n < 0 || !buf[0]) {
 		/* the server uses the v1 protocol, so we'll use it */
-		proto_ver = V1_PROTOCOL;
+		msg_handle->version = V1_PROTOCOL;
 		plog("Use the v1 protocol\n");
 	} else {
 		if (memcmp(buf, "V2", n) != 0)
@@ -2774,6 +2773,7 @@ communicate_with_listener_virt(int fd)
 		die("Failed to allocate message handle");
 
 	msg_handle->cpu_count = cpu_count;
+	msg_handle->version = V2_PROTOCOL;
 
 	if (tracecmd_msg_connect_to_server(msg_handle) < 0)
 		die("Cannot communicate with server");
@@ -2836,20 +2836,21 @@ again:
 		die("Failed to allocate message handle");
 
 	msg_handle->cpu_count = cpu_count;
+	msg_handle->version = V2_PROTOCOL;
 
 	if (use_tcp)
 		msg_handle->flags |= TRACECMD_MSG_FL_USE_TCP;
 
-	if (proto_ver == V2_PROTOCOL) {
+	if (msg_handle->version == V2_PROTOCOL) {
 		check_protocol_version(msg_handle);
-		if (proto_ver == V1_PROTOCOL) {
+		if (msg_handle->version == V1_PROTOCOL) {
 			/* reconnect to the server for using the v1 protocol */
 			close(sfd);
 			goto again;
 		}
 	}
 
-	if (proto_ver == V1_PROTOCOL)
+	if (msg_handle->version == V1_PROTOCOL)
 		communicate_with_listener_v1_net(msg_handle);
 
 	return msg_handle;
@@ -2876,7 +2877,7 @@ static struct tracecmd_msg_handle *setup_connection(void)
 		msg_handle = setup_virtio();
 
 	/* Now create the handle through this socket */
-	if (proto_ver == V2_PROTOCOL) {
+	if (msg_handle->version == V2_PROTOCOL) {
 		if (tracecmd_msg_send_init_data(msg_handle) < 0)
 			die("Cannot communicate with server");
 		network_handle = tracecmd_create_init_fd_msg(msg_handle, listed_events);
@@ -2891,7 +2892,7 @@ static struct tracecmd_msg_handle *setup_connection(void)
 
 static void finish_network(struct tracecmd_msg_handle *msg_handle)
 {
-	if (proto_ver == V2_PROTOCOL)
+	if (msg_handle->version == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg(msg_handle);
 	tracecmd_msg_handle_close(msg_handle);
 	free(host);

@@ -64,8 +64,6 @@ static FILE *logfp;
 
 static int backlog = 5;
 
-static int proto_ver;
-
 static int do_daemon;
 
 static int unlink_sock;
@@ -528,7 +526,7 @@ static int communicate_with_client_net(struct tracecmd_msg_handle *msg_handle,
 		/* We're off! */
 		write(fd, "OK", 2);
 
-		proto_ver = V2_PROTOCOL;
+		msg_handle->version = V2_PROTOCOL;
 
 	} else {
 		/* The client is using the v1 protocol */
@@ -607,7 +605,7 @@ static int
 communicate_with_client_virt(struct tracecmd_msg_handle *msg_handle,
 			     const char *domain)
 {
-	proto_ver = V2_PROTOCOL;
+	msg_handle->version = V2_PROTOCOL;
 
 	if (tracecmd_msg_set_connection(msg_handle, domain) < 0) {
 		plog("Failed connection to domain %s\n", domain);
@@ -703,7 +701,7 @@ static int *create_all_readers(int cpus, const char *node, const char *port,
 		pid_array[cpu] = pid;
 	}
 
-	if (proto_ver == V2_PROTOCOL) {
+	if (msg_handle->version == V2_PROTOCOL) {
 		/* send set of port numbers to the client */
 		if (tracecmd_msg_send_port_array(msg_handle, cpus, port_array) < 0) {
 			plog("Failed sending port array\n");
@@ -819,7 +817,7 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 		return -EINVAL;
 
 	/* read the CPU count, the page size, and options */
-	if ((proto_ver == V2_PROTOCOL) &&
+	if ((msg_handle->version == V2_PROTOCOL) &&
 	    tracecmd_msg_initial_setting(msg_handle, &cpus, &pagesize) < 0) {
 		plog("Failed inital settings\n");
 		return -EINVAL;
@@ -835,7 +833,7 @@ static int process_client(struct tracecmd_msg_handle *msg_handle,
 	stop_msg_handle = msg_handle;
 
 	/* Now we are ready to start reading data from the client */
-	if (proto_ver == V2_PROTOCOL)
+	if (msg_handle->version == V2_PROTOCOL)
 		tracecmd_msg_collect_metadata(msg_handle, ofd);
 	else
 		collect_metadata_from_client(msg_handle, ofd);

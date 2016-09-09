@@ -301,7 +301,8 @@ enum tracecmd_msg_flags {
 /* for both client and server */
 struct tracecmd_msg_handle {
 	int			fd;
-	int			cpu_count;
+	short			cpu_count;
+	short			version;	/* Current protocol version */
 	unsigned long		flags;
 };
 
