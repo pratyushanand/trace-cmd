@@ -1154,6 +1154,7 @@ static void reset_client(struct client_list *clients, int fd_idx)
 		return;
 
 	idx = fd_idx - FD_CONNECTED;
+	plog("Closing %s:%d\n", clients[idx].name, clients[idx].pid);
 	free(clients[idx].name);
 	clients[idx].name = NULL;
 	clients[idx].pid = 0;
