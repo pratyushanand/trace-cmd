@@ -1050,6 +1050,8 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 
 	msg_handle = tracecmd_msg_handle_alloc(cfd, TRACECMD_MSG_FL_SERVER);
 
+	ret = -EINVAL;
+
 	if (mode == NET) {
 		s = getnameinfo(peer_addr, peer_addr_len, host, NI_MAXHOST,
 				service, NI_MAXSERV, NI_NUMERICSERV);
@@ -1063,30 +1065,35 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 			close(cfd);
 			return -1;
 		}
-		process_client_net(msg_handle, host, service);
+		ret = process_client_net(msg_handle, host, service);
 	} else if (mode == VIRT)
-		process_client_virt(msg_handle, domain, virtpid);
+		ret = process_client_virt(msg_handle, domain, virtpid);
 
 	tracecmd_msg_handle_close(msg_handle);
 
 	if (!debug)
-		exit(0);
+		exit(ret);
 
 	return 0;
 }
 
-static int *client_pids;
+struct client_pid_list {
+	int		pid;
+	int		fd_idx;
+};
+
+static struct client_pid_list *client_pids;
 static int free_pids;
 static int saved_pids;
 
-static void add_process(int pid)
+static void add_process(int pid, int idx)
 {
-	int *client = NULL;
+	struct client_pid_list  *client = NULL;
 	int i;
 
 	if (free_pids) {
 		for (i = 0; i < saved_pids; i++) {
-			if (!client_pids[i]) {
+			if (!client_pids[i].pid) {
 				client = &client_pids[i];
 				break;
 			}
@@ -1102,22 +1109,54 @@ static void add_process(int pid)
 			pdie("allocating pids");
 		client = &client_pids[saved_pids++];
 	}
-	*client = pid;
+	client->pid = pid;
+	client->fd_idx = idx;
 }
 
-static void remove_process(int pid)
+static int active_processes(void)
 {
+	int ret = 0;
 	int i;
 
 	for (i = 0; i < saved_pids; i++) {
-		if (client_pids[i] == pid)
+		if (client_pids[i].pid) {
+			ret = 1;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static void reset_fds(struct pollfd *fds)
+{
+	close(fds->fd);
+	fds->fd = -1;
+	fds->events = 0;
+}
+
+static void remove_process(int pid, int status, struct pollfd *fds)
+{
+	int idx;
+	int i;
+
+	for (i = 0; i < saved_pids; i++) {
+		if (client_pids[i].pid == pid)
 			break;
 	}
 
 	if (i == saved_pids)
 		return;
 
-	client_pids[i] = 0;
+	idx = client_pids[i].fd_idx;
+
+	/* If this process errored, close the fd */
+	if (status)
+		reset_fds(&fds[idx]);
+	else
+		fds[idx].events |= POLLIN;
+
+	client_pids[i].pid = 0;
 	free_pids++;
 }
 
@@ -1126,16 +1165,16 @@ static void kill_clients(void)
 	int i;
 
 	for (i = 0; i < saved_pids; i++) {
-		if (!client_pids[i])
+		if (!client_pids[i].pid)
 			continue;
-		kill(client_pids[i], SIGINT);
-		waitpid(client_pids[i], NULL, 0);
+		kill(client_pids[i].pid, SIGINT);
+		waitpid(client_pids[i].pid, NULL, 0);
 	}
 
 	saved_pids = 0;
 }
 
-static void clean_up(void)
+static void clean_up(struct pollfd *fds)
 {
 	int status;
 	int ret;
@@ -1144,7 +1183,7 @@ static void clean_up(void)
 	do {
 		ret = waitpid(0, &status, WNOHANG);
 		if (ret > 0)
-			remove_process(ret);
+			remove_process(ret, WEXITSTATUS(status), fds);
 	} while (ret > 0);
 }
 
@@ -1189,6 +1228,7 @@ static void do_accept_loop(int nfd, int vfd)
 	socklen_t addrlen;
 	struct pollfd *fds;
 	char *domain = NULL;
+	int timeout = -1;
 	int free_fds = 0;
 	int nr_fds = 2;
 	int virtpid;
@@ -1209,26 +1249,33 @@ static void do_accept_loop(int nfd, int vfd)
 		fds[FD_VIRT].events = POLLIN;
 
 	do {
-		ret = poll(fds, nr_fds, -1);
+		/* If there are active threads, then timeout to
+		 * make sure we can clean up. Otherwise we have a
+		 * race between checking here and calling poll.
+		 */
+		timeout = active_processes() ? 500 : -1;
+
+		ret = poll(fds, nr_fds, timeout);
 
 		if (ret < 0) {
 			if (errno == EINTR) {
-				clean_up();
+				clean_up(fds);
 				continue;
 			}
 			pdie("poll");
 		}
 
-		if (!ret)
+		if (!ret) {
+			/* Timed out */
+			clean_up(fds);
 			continue;
+		}
 
 		for (i = 0; i < nr_fds; i++) {
 
 			if (fds[i].revents & POLLHUP) {
-				close(fds[i].fd);
-				fds[i].fd = -1;
-				fds[i].events = 0;
-				if (i >= FD_CONNECTED)
+				reset_fds(&fds[i]);
+				if (i < FD_CONNECTED)
 					free_fds++;
 				continue;
 			}
@@ -1333,18 +1380,26 @@ static void do_accept_loop(int nfd, int vfd)
 
 			if (i == FD_NET)
 				pid = do_connection(cfd, &addr, addrlen, NULL, 0, NET);
-			else
+			else {
 				pid = do_connection(cfd, NULL, 0,
 						    client->name,
 						    client->pid, VIRT);
+				/*
+				 * The client is accessing this file descriptor,
+				 * don't poll on it for now. The clean up
+				 * will re-institute it.
+				 */
+				if (!debug && pid > 0)
+					fds[i].events &= ~POLLIN;
+			}
 
 			if (pid > 0)
-				add_process(pid);
+				add_process(pid, i);
 		}
 	} while (!done);
 
 	/* Get any final stragglers */
-	clean_up();
+	clean_up(fds);
 
 	for (i = 0; i < nr_fds; i++)
 		close(fds[i].fd);
