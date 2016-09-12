@@ -1159,6 +1159,14 @@ struct client_list {
 	int		pid;
 };
 
+static void
+update_client(struct client_list *clients, int nr,
+	      const char *domain, int virtpid)
+{
+	clients[nr].name = domain;
+	clients[nr].pid = virtpid;
+}
+
 static struct client_list *
 add_client(struct client_list *clients, int nr, const char *domain, int virtpid)
 {
@@ -1168,8 +1176,7 @@ add_client(struct client_list *clients, int nr, const char *domain, int virtpid)
 	if (!clients)
 		return NULL;
 
-	clients[nr].name = domain;
-	clients[nr].pid = virtpid;
+	update_client(clients, nr, domain, virtpid);
 
 	return clients;
 }
@@ -1182,6 +1189,7 @@ static void do_accept_loop(int nfd, int vfd)
 	socklen_t addrlen;
 	struct pollfd *fds;
 	char *domain = NULL;
+	int free_fds = 0;
 	int nr_fds = 2;
 	int virtpid;
 	int cfd, pid;
@@ -1216,6 +1224,15 @@ static void do_accept_loop(int nfd, int vfd)
 
 		for (i = 0; i < nr_fds; i++) {
 
+			if (fds[i].revents & POLLHUP) {
+				close(fds[i].fd);
+				fds[i].fd = -1;
+				fds[i].events = 0;
+				if (i >= FD_CONNECTED)
+					free_fds++;
+				continue;
+			}
+
 			if (!fds[i].revents & POLLIN)
 				continue;
 
@@ -1239,6 +1256,7 @@ static void do_accept_loop(int nfd, int vfd)
 				 */
 				if (i == FD_VIRT) {
 					void *new;
+					int fd;
 
 					virtpid = get_virtpid(cfd);
 					if (virtpid < 0) {
@@ -1255,29 +1273,49 @@ static void do_accept_loop(int nfd, int vfd)
 						continue;
 					}
 
-					new = add_client(clients, nr_fds,
-							 domain, virtpid);
-					if (!new) {
-						plog("Failed to allocate client for %s:%d\n",
-						     domain, virtpid);
-						continue;
+					if (free_fds) {
+						int x;
+
+						for (x = FD_CONNECTED; x < nr_fds; x++)
+							if (fds[x].fd < 0)
+								break;
+						if (x == nr_fds) {
+							warning("Could not find free file descriptor");
+							free_fds = 0;
+						} else {
+							update_client(clients, x,
+								      domain, virtpid);
+							free_fds--;
+							fd = x;
+						}
+					} else {
+						new = add_client(clients, nr_fds,
+								 domain, virtpid);
+						if (!new) {
+							plog("Failed to allocate client for %s:%d\n",
+							     domain, virtpid);
+							continue;
+						}
+						clients = new;
+						fd = nr_fds;
 					}
-					clients = new;
 
 					plog("start %s:%d\n", domain, virtpid);
 
-					new = realloc(fds, sizeof(*fds) * (nr_fds + 1));
-					if (!new) {
-						plog("Failed to allocate for new connection for %s", domain);
-						close(cfd);
-						continue;
+					if (fd == nr_fds) {
+						new = realloc(fds, sizeof(*fds) * (nr_fds + 1));
+						if (!new) {
+							plog("Failed to allocate for new connection for %s", domain);
+							close(cfd);
+							continue;
+						}
+						fds = new;
+						nr_fds++;
 					}
-					fds = new;
 
-					memset(&fds[nr_fds], 0, sizeof(*fds));
-					fds[nr_fds].fd = cfd;
-					fds[nr_fds].events = POLLIN;
-					nr_fds++;
+					memset(&fds[fd], 0, sizeof(*fds));
+					fds[fd].fd = cfd;
+					fds[fd].events = POLLIN | POLLHUP;
 
 					continue;
 				} else {
