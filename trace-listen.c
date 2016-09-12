@@ -1077,9 +1077,20 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 	return 0;
 }
 
+enum {
+	FD_NET		= 0,
+	FD_VIRT		= 1,
+	FD_CONNECTED,
+};
+
 struct client_pid_list {
 	int		pid;
 	int		fd_idx;
+};
+
+struct client_list {
+	char		*name;
+	int		pid;
 };
 
 static struct client_pid_list *client_pids;
@@ -1135,7 +1146,21 @@ static void reset_fds(struct pollfd *fds)
 	fds->events = 0;
 }
 
-static void remove_process(int pid, int status, struct pollfd *fds)
+static void reset_client(struct client_list *clients, int fd_idx)
+{
+	int idx;
+
+	if (fd_idx < FD_CONNECTED)
+		return;
+
+	idx = fd_idx - FD_CONNECTED;
+	free(clients[idx].name);
+	clients[idx].name = NULL;
+	clients[idx].pid = 0;
+}
+
+static void remove_process(int pid, int status, struct pollfd *fds,
+			   struct client_list *clients)
 {
 	int idx;
 	int i;
@@ -1151,9 +1176,10 @@ static void remove_process(int pid, int status, struct pollfd *fds)
 	idx = client_pids[i].fd_idx;
 
 	/* If this process errored, close the fd */
-	if (status)
+	if (status) {
 		reset_fds(&fds[idx]);
-	else
+		reset_client(clients, idx);
+	} else
 		fds[idx].events |= POLLIN;
 
 	client_pids[i].pid = 0;
@@ -1174,7 +1200,7 @@ static void kill_clients(void)
 	saved_pids = 0;
 }
 
-static void clean_up(struct pollfd *fds)
+static void clean_up(struct pollfd *fds, struct client_list *clients)
 {
 	int status;
 	int ret;
@@ -1183,31 +1209,20 @@ static void clean_up(struct pollfd *fds)
 	do {
 		ret = waitpid(0, &status, WNOHANG);
 		if (ret > 0)
-			remove_process(ret, WEXITSTATUS(status), fds);
+			remove_process(ret, WEXITSTATUS(status), fds, clients);
 	} while (ret > 0);
 }
 
-enum {
-	FD_NET		= 0,
-	FD_VIRT		= 1,
-	FD_CONNECTED,
-};
-
-struct client_list {
-	const char	*name;
-	int		pid;
-};
-
 static void
 update_client(struct client_list *clients, int nr,
-	      const char *domain, int virtpid)
+	      char *domain, int virtpid)
 {
 	clients[nr].name = domain;
 	clients[nr].pid = virtpid;
 }
 
 static struct client_list *
-add_client(struct client_list *clients, int nr, const char *domain, int virtpid)
+add_client(struct client_list *clients, int nr, char *domain, int virtpid)
 {
 	nr -= FD_CONNECTED;
 
@@ -1259,7 +1274,7 @@ static void do_accept_loop(int nfd, int vfd)
 
 		if (ret < 0) {
 			if (errno == EINTR) {
-				clean_up(fds);
+				clean_up(fds, clients);
 				continue;
 			}
 			pdie("poll");
@@ -1267,7 +1282,7 @@ static void do_accept_loop(int nfd, int vfd)
 
 		if (!ret) {
 			/* Timed out */
-			clean_up(fds);
+			clean_up(fds, clients);
 			continue;
 		}
 
@@ -1275,6 +1290,7 @@ static void do_accept_loop(int nfd, int vfd)
 
 			if (fds[i].revents & POLLHUP) {
 				reset_fds(&fds[i]);
+				reset_client(clients, i);
 				if (i < FD_CONNECTED)
 					free_fds++;
 				continue;
@@ -1399,10 +1415,14 @@ static void do_accept_loop(int nfd, int vfd)
 	} while (!done);
 
 	/* Get any final stragglers */
-	clean_up(fds);
+	clean_up(fds, clients);
 
-	for (i = 0; i < nr_fds; i++)
+	for (i = 0; i < nr_fds; i++) {
+		if (fds[i].fd < 0)
+			continue;
 		close(fds[i].fd);
+		reset_client(clients, i);
+	}
 
 	free(fds);
 }
