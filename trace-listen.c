@@ -1193,10 +1193,12 @@ static void do_accept_loop(int nfd, int vfd)
 		pdie("allocating fds");
 
 	fds[FD_NET].fd = nfd;
-	fds[FD_NET].events = POLLIN;
+	if (nfd >= 0)
+		fds[FD_NET].events = POLLIN;
 
 	fds[FD_VIRT].fd = vfd;
-	fds[FD_VIRT].events = POLLIN;
+	if (vfd >= 0)
+		fds[FD_VIRT].events = POLLIN;
 
 	do {
 		ret = poll(fds, nr_fds, -1);
