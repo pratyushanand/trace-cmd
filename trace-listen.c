@@ -51,9 +51,12 @@
 #define TRACE_CMD_RUN_DIR	VAR_RUN_DIR "/trace-cmd/"
 #define VIRT_DIR		TRACE_CMD_DIR "virt/"
 #define VIRT_TRACE_CTL_SOCK	TRACE_CMD_RUN_DIR "agent-ctl-path"
+#define TRACE_MRG_SOCK		TRACE_CMD_RUN_DIR "manager-ctl-path"
 #define VIRT_DOMAIN_DIR		VIRT_DIR "%s/"
 #define TRACE_PATH_DOMAIN_CPU_O	VIRT_DOMAIN_DIR "trace-path-cpu%d.out"
 #define TRACE_PATH_DOMAIN_CPU_I	VIRT_DOMAIN_DIR "trace-path-cpu%d.in"
+
+#define PID_AGENT 1
 
 static char *default_output_dir = ".";
 static char *output_dir;
@@ -804,6 +807,38 @@ static int put_together_file(int cpus, int ofd, const char *node,
 	return ret;
 }
 
+void trace_show_agents(void)
+{
+	struct tracecmd_msg_handle *msg_handle;
+	struct sockaddr_un un_server;
+	socklen_t slen;
+	int sfd;
+
+	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sfd < 0)
+		die("Cannot create socket");
+
+	un_server.sun_family = AF_UNIX;
+	snprintf(un_server.sun_path, strlen(TRACE_MRG_SOCK)+1, TRACE_MRG_SOCK);
+
+	slen = sizeof(un_server);
+	if (connect(sfd, (struct sockaddr *)&un_server, slen) < 0)
+		die("Can not connect to socket %s", TRACE_MRG_SOCK);
+
+	msg_handle = tracecmd_msg_handle_alloc(sfd, TRACECMD_MSG_FL_MANAGER);
+
+	if (!msg_handle)
+		die("Failed to allocate message handle");
+
+	if (tracecmd_msg_connect_to_server(msg_handle) < 0)
+		die("Cannot communicate with server");
+
+	if (tracecmd_msg_list_agents(msg_handle) < 0)
+		die("Failed listing agents");
+
+	close(sfd);
+}
+
 static int communicate_with_client(struct tracecmd_msg_handle *msg_handle,
 				   const char *domain, int mode)
 {
@@ -827,6 +862,9 @@ static int communicate_with_client(struct tracecmd_msg_handle *msg_handle,
 		plog("Failed inital settings\n");
 		return -EINVAL;
 	}
+
+	if (msg_handle->flags & TRACECMD_MSG_FL_AGENT)
+		return 0;
 
 	if (!pagesize)
 		return -EINVAL;
@@ -1080,6 +1118,9 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 
 	pagesize = communicate_with_client(msg_handle, domain, mode);
 
+	if (msg_handle->flags & TRACECMD_MSG_FL_AGENT)
+		return PID_AGENT;
+
 	if (pagesize <= 0)
 		return -EINVAL;
 
@@ -1107,7 +1148,12 @@ static int do_connection(int cfd, struct sockaddr *peer_addr,
 enum {
 	FD_NET		= 0,
 	FD_VIRT		= 1,
+	FD_MNGR		= 2,
 	FD_CONNECTED,
+};
+
+enum {
+	CLIENT_AGENT	= 1,
 };
 
 struct client_pid_list {
@@ -1118,6 +1164,7 @@ struct client_pid_list {
 struct client_list {
 	char		*name;
 	int		pid;
+	int		flags;
 };
 
 static struct client_pid_list *client_pids;
@@ -1247,6 +1294,7 @@ update_client(struct client_list *clients, int nr,
 {
 	clients[nr].name = domain;
 	clients[nr].pid = virtpid;
+	clients[nr].flags = 0;
 }
 
 static struct client_list *
@@ -1263,7 +1311,49 @@ add_client(struct client_list *clients, int nr, char *domain, int virtpid)
 	return clients;
 }
 
-static void do_accept_loop(int nfd, int vfd)
+static void handle_manager(int cfd, int nr_fds, struct pollfd *fds,
+			   struct client_list *clients)
+{
+	struct tracecmd_msg_handle *msg_handle;
+	enum tracecmd_msg_mngr_type type;
+	struct client_list *client;
+	int i;
+	
+	msg_handle = tracecmd_msg_handle_alloc(cfd, TRACECMD_MSG_FL_SERVER);
+	if (!msg_handle) {
+		plog("Failed to allocate msg_handle");
+		goto out;
+	}
+
+	if (tracecmd_msg_set_connection(msg_handle, "manager") < 0) {
+		plog("Failed connection to manager\n");
+		goto out;
+	}
+
+	type = tracecmd_msg_read_manager(msg_handle);
+
+	switch (type) {
+	case TRACECMD_MSG_MNG_LIST:
+		for (i = FD_CONNECTED; i < nr_fds; i++) {
+			if (fds[i].fd < 0)
+				continue;
+			client = &clients[i - FD_CONNECTED];
+			if (!(client->flags & CLIENT_AGENT))
+				continue;
+			tracecmd_msg_send_client(msg_handle, client->name,
+						 client->pid);
+		}
+		tracecmd_msg_finish_clients(msg_handle);
+		break;
+	default:
+		break;
+	}
+
+ out:
+	close(cfd);
+}
+
+static void do_accept_loop(int nfd, int vfd, int mfd)
 {
 	struct client_list *clients = NULL;
 	struct client_list *client;
@@ -1273,7 +1363,7 @@ static void do_accept_loop(int nfd, int vfd)
 	char *domain = NULL;
 	int timeout = -1;
 	int free_fds = 0;
-	int nr_fds = 2;
+	int nr_fds = FD_CONNECTED;
 	int virtpid;
 	int cfd, pid;
 	int ret;
@@ -1290,6 +1380,10 @@ static void do_accept_loop(int nfd, int vfd)
 	fds[FD_VIRT].fd = vfd;
 	if (vfd >= 0)
 		fds[FD_VIRT].events = POLLIN;
+
+	fds[FD_MNGR].fd = mfd;
+	if (mfd >= 0)
+		fds[FD_MNGR].events = POLLIN;
 
 	do {
 		/* If there are active threads, then timeout to
@@ -1409,6 +1503,11 @@ static void do_accept_loop(int nfd, int vfd)
 					fds[fd].events = POLLIN | POLLHUP;
 
 					continue;
+
+				} else if (i == FD_MNGR) {
+					handle_manager(cfd, nr_fds, fds, clients);
+					continue;
+
 				} else {
 					virtpid = 0;
 					domain = NULL;
@@ -1433,11 +1532,13 @@ static void do_accept_loop(int nfd, int vfd)
 				 * don't poll on it for now. The clean up
 				 * will re-institute it.
 				 */
-				if (!debug && pid > 0)
+				if (!debug && pid != PID_AGENT && pid > 0)
 					fds[i].events &= ~POLLIN;
 			}
 
-			if (pid > 0)
+			if (pid == PID_AGENT)
+				client->flags |= CLIENT_AGENT;
+			else if (pid > 0)
 				add_process(pid, i);
 		}
 	} while (!done);
@@ -1608,12 +1709,14 @@ static void make_virt_if_dir(void)
 
 static void remove_sock(void)
 {
-	if (unlink_sock)
+	if (unlink_sock) {
 		unlink(VIRT_TRACE_CTL_SOCK);
+		unlink(TRACE_MRG_SOCK);
+	}
 	unlink_sock = 0;
 }
 
-static int set_up_virt(void)
+static int set_up_socket(const char *file)
 {
 	struct sockaddr_un un_server;
 	struct group *group;
@@ -1628,16 +1731,16 @@ static int set_up_virt(void)
 		pdie("socket");
 
 	un_server.sun_family = AF_UNIX;
-	snprintf(un_server.sun_path, PATH_MAX, VIRT_TRACE_CTL_SOCK);
+	snprintf(un_server.sun_path, PATH_MAX, file);
 
 	if (bind(sfd, (struct sockaddr *)&un_server, slen) < 0)
 		pdie("bind");
 	unlink_sock = 1;
 
-	chmod(VIRT_TRACE_CTL_SOCK, 0660);
+	chmod(file, 0660);
 	group = getgrnam("qemu");
-	if (chown(VIRT_TRACE_CTL_SOCK, -1, group->gr_gid) < 0)
-		pdie("fchown %s", VIRT_TRACE_CTL_SOCK);
+	if (chown(file, -1, group->gr_gid) < 0)
+		pdie("fchown %s", file);
 
 	if (listen(sfd, backlog) < 0)
 		pdie("listen");
@@ -1645,9 +1748,19 @@ static int set_up_virt(void)
 	return sfd;
 }
 
-static void do_listen(int nfd, int vfd)
+static int set_up_virt(void)
 {
-	do_accept_loop(nfd, vfd);
+	return set_up_socket(VIRT_TRACE_CTL_SOCK);
+}
+
+static int set_up_manager(void)
+{
+	return set_up_socket(TRACE_MRG_SOCK);
+}
+
+static void do_listen(int nfd, int vfd, int mfd)
+{
+	do_accept_loop(nfd, vfd, mfd);
 
 	remove_sock();
 
@@ -1670,6 +1783,7 @@ static void add_dom_dir(struct domain_dir *dom_dir)
 }
 
 enum {
+	OPT_manage	= 252,
 	OPT_virt	= 253,
 	OPT_dom		= 254,
 	OPT_debug	= 255,
@@ -1686,8 +1800,10 @@ void trace_listen(int argc, char **argv)
 	char *port = NULL;
 	int daemon = 0;
 	int virt = 0;
+	int manager = 0;
 	int nfd = -1;
 	int vfd = -1;
+	int mfd = -1;
 	int c;
 
 	if (argc < 2)
@@ -1698,6 +1814,7 @@ void trace_listen(int argc, char **argv)
 		static struct option long_options[] = {
 			{"port", required_argument, NULL, 'p'},
 			{"virt", no_argument, NULL, OPT_virt},
+			{"manager", no_argument, NULL, OPT_manage},
 			{"dom", required_argument, NULL, OPT_dom},
 			{"help", no_argument, NULL, '?'},
 			{"debug", no_argument, NULL, OPT_debug},
@@ -1762,6 +1879,9 @@ void trace_listen(int argc, char **argv)
 		case OPT_virt:
 			virt = 1;
 			break;
+		case OPT_manage:
+			manager = 1;
+			break;
 		default:
 			usage(argv);
 		}
@@ -1808,7 +1928,12 @@ void trace_listen(int argc, char **argv)
 		vfd = set_up_virt();
 	}
 
-	do_listen(nfd, vfd);
+	if (manager) {
+		atexit(remove_sock);
+		mfd = set_up_manager();
+	}
+
+	do_listen(nfd, vfd, mfd);
 
 	return;
 }

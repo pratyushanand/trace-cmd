@@ -54,11 +54,15 @@ void show_file(const char *name);
 struct tracecmd_input *read_trace_header(const char *file);
 int read_trace_files(void);
 
-void trace_record(int argc, char **argv);
+struct tracecmd_msg_handle;
+
+void trace_record(int argc, char **argv, struct tracecmd_msg_handle *msg_handle);
 
 void trace_report(int argc, char **argv);
 
 void trace_split(int argc, char **argv);
+
+void trace_agent(int argc, char **argv);
 
 void trace_listen(int argc, char **argv);
 
@@ -169,6 +173,7 @@ struct buffer_instance {
 	int			keep;
 	int			buffer_size;
 	int			profile;
+	int			guest;
 };
 
 extern struct buffer_instance top_instance;
@@ -186,5 +191,7 @@ void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
 int count_cpus(void);
+
+void trace_show_agents(void);
 
 #endif /* __TRACE_LOCAL_H */

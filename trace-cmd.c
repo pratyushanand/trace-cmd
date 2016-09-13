@@ -443,6 +443,9 @@ int main (int argc, char **argv)
 	} else if (strcmp(argv[1], "stack") == 0) {
 		trace_stack(argc, argv);
 		exit(0);
+	} else if (strcmp(argv[1], "agent") == 0) {
+		trace_agent(argc, argv);
+		exit(0);
 	} else if (strcmp(argv[1], "check-events") == 0) {
 		const char *tracing;
 		int ret;
@@ -490,7 +493,7 @@ int main (int argc, char **argv)
 		   strcmp(argv[1], "profile") == 0 ||
 		   strcmp(argv[1], "restart") == 0 ||
 		   strcmp(argv[1], "reset") == 0) {
-		trace_record(argc, argv);
+		trace_record(argc, argv, NULL);
 		exit(0);
 
 	} else if (strcmp(argv[1], "stat") == 0) {
@@ -645,6 +648,7 @@ int main (int argc, char **argv)
 		int plug = 0;
 		int plug_op = 0;
 		int flags = 0;
+		int agents = 0;
 		int show_all = 1;
 		int i;
 		const char *arg;
@@ -661,6 +665,10 @@ int main (int argc, char **argv)
 				switch (argv[i][1]) {
 				case 'h':
 					usage(argv);
+					break;
+				case 'A':
+					agents = 1;
+					show_all = 0;
 					break;
 				case 'e':
 					events = 1;
@@ -737,6 +745,9 @@ int main (int argc, char **argv)
 
 		if (clocks)
 			show_clocks();
+
+		if (agents)
+			trace_show_agents();
 
 		if (show_all) {
 			printf("events:\n");

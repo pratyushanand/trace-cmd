@@ -288,6 +288,8 @@ enum tracecmd_msg_bits {
 	TRACECMD_MSG_BIT_NETWORK	= 2,
 	TRACECMD_MSG_BIT_VIRT		= 3,
 	TRACECMD_MSG_BIT_USE_TCP	= 4,
+	TRACECMD_MSG_BIT_AGENT		= 5,
+	TRACECMD_MSG_BIT_MANAGER	= 6,
 };
 
 enum tracecmd_msg_flags {
@@ -296,6 +298,13 @@ enum tracecmd_msg_flags {
 	TRACECMD_MSG_FL_NETWORK		= (1 << TRACECMD_MSG_BIT_NETWORK),
 	TRACECMD_MSG_FL_VIRT		= (1 << TRACECMD_MSG_BIT_VIRT),
 	TRACECMD_MSG_FL_USE_TCP		= (1 << TRACECMD_MSG_BIT_USE_TCP),
+	TRACECMD_MSG_FL_AGENT		= (1 << TRACECMD_MSG_BIT_AGENT),
+	TRACECMD_MSG_FL_MANAGER		= (1 << TRACECMD_MSG_BIT_MANAGER),
+};
+
+enum tracecmd_msg_mngr_type {
+	TRACECMD_MSG_MNG_ERR		= 0,
+	TRACECMD_MSG_MNG_LIST		= 1,
 };
 
 /* for both client and server */
@@ -332,6 +341,17 @@ int tracecmd_msg_send_port_array(struct tracecmd_msg_handle *msg_handle,
 int tracecmd_msg_collect_metadata(struct tracecmd_msg_handle *msg_handle, int ofd);
 bool tracecmd_msg_done(struct tracecmd_msg_handle *msg_handle);
 void tracecmd_msg_set_done(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_finish_clients(struct tracecmd_msg_handle *msg_handle);
+int tracecmd_msg_send_client(struct tracecmd_msg_handle *msg_handle,
+			     const char *name, int pid);
+enum tracecmd_msg_mngr_type
+tracecmd_msg_read_manager(struct tracecmd_msg_handle *msg_handle);
+
+/* for agent */
+int tracecmd_msg_agent_connect(struct tracecmd_msg_handle *msg_handle);
+
+/* for manager */
+int tracecmd_msg_list_agents(struct tracecmd_msg_handle *msg_handle);
 
 /* --- Plugin handling --- */
 extern struct pevent_plugin_option trace_ftrace_options[];

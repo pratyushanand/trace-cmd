@@ -150,7 +150,13 @@ struct tracecmd_msg_error {
 	C(TINIT)				\
 	C(RINIT)				\
 	C(SENDMETA)				\
-	C(FINMETA)
+	C(FINMETA)				\
+	C(CINIT)				\
+	C(CRINIT)				\
+	C(CONNECT)				\
+	C(ALIST)				\
+	C(LIST)					\
+	C(FINISH)
 
 #undef C
 #define C(a)	MSG_##a,
@@ -214,6 +220,7 @@ static ssize_t msg_do_write_check(struct tracecmd_msg_handle *msg_handle,
 		break;
 	case MSG_SENDMETA:
 	case MSG_RCONNECT:
+	case MSG_LIST:
 		ret = msg_write(fd, msg, MIN_DATA_SIZE, msg->data.data.buf);
 		break;
 	default:
@@ -363,6 +370,8 @@ static int tracecmd_msg_create(struct tracecmd_msg_handle *msg_handle,
 	case MSG_CLOSE:
 	case MSG_SENDMETA: /* meta data is not stored here. */
 	case MSG_FINMETA:
+	case MSG_ALIST:
+	case MSG_LIST:
 		break;
 	}
 
@@ -489,6 +498,7 @@ static int tracecmd_msg_read_extra(int fd, struct tracecmd_msg *msg, int *n)
 				      (void **)&msg->data.rinit.port_array);
 	case MSG_SENDMETA:
 	case MSG_RCONNECT:
+	case MSG_LIST:
 		return msg_read_extra(fd, msg, n, size, MIN_DATA_SIZE,
 				      (void **)&msg->data.data.buf);
 	}
@@ -622,6 +632,47 @@ int tracecmd_msg_send_init_data(struct tracecmd_msg_handle *msg_handle)
 	return 0;
 }
 
+int tracecmd_msg_agent_connect(struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_msg msg;
+	int ret;
+	u32 cmd;
+
+	ret = tracecmd_msg_send(msg_handle, MSG_CINIT);
+	if (ret < 0)
+		return ret;
+
+	ret = tracecmd_msg_recv_wait(msg_handle, &msg);
+	if (ret < 0) {
+		if (ret == -ETIMEDOUT)
+			warning("Connection timed out\n");
+		return ret;
+	}
+
+	cmd = ntohl(msg.cmd);
+	if (cmd != MSG_CRINIT) {
+		warning("Expected CRINIT and received %d\n", cmd);
+		return -EINVAL;
+	}
+
+	/* Now we just sit and wait for connection */
+	ret = tracecmd_msg_recv(msg_handle, &msg);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * TODO, At this point we are waiting for a connection
+	 * from a manager to perform a record.
+	 */
+	cmd = ntohl(msg.cmd);
+	if (cmd != MSG_CONNECT) {
+		warning("Expected CONNECT and received %d\n", cmd);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 int tracecmd_msg_connect_to_server(struct tracecmd_msg_handle *msg_handle)
 {
 	struct tracecmd_msg msg;
@@ -659,6 +710,101 @@ int tracecmd_msg_connect_to_server(struct tracecmd_msg_handle *msg_handle)
 error:
 	tracecmd_msg_send_error(msg_handle, &msg);
 	return ret;
+}
+
+int tracecmd_msg_list_agents(struct tracecmd_msg_handle *msg_handle)
+{
+	struct tracecmd_msg_data *meta;
+	struct tracecmd_msg msg;
+	u32 cmd;
+	int ret;
+	int i;
+
+	ret = tracecmd_msg_send(msg_handle, MSG_ALIST);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; ; i++) {
+		ret = tracecmd_msg_recv_wait(msg_handle, &msg);
+		if (ret < 0) {
+			if (ret == -ETIMEDOUT)
+				warning("Connection timed out\n");
+			return ret;
+		}
+
+		cmd = ntohl(msg.cmd);
+		if (cmd == MSG_FINISH)
+			break;
+
+		if (cmd != MSG_LIST) {
+			warning("Unknown response %d\n", cmd);
+			return -EINVAL;
+		}
+
+		meta = &msg.data.data;
+		printf("%*s\n", ntohl(meta->size), (char *)meta->buf);
+	}
+	if (!i)
+		printf("No agents registered\n");
+
+	return 0;
+}
+
+enum tracecmd_msg_mngr_type
+tracecmd_msg_read_manager(struct tracecmd_msg_handle *msg_handle)
+{
+	enum tracecmd_msg_mngr_type type = TRACECMD_MSG_MNG_ERR;
+	struct tracecmd_msg msg;
+	u32 cmd;
+	int ret;
+
+	ret = tracecmd_msg_recv_wait(msg_handle, &msg);
+	if (ret < 0)
+		goto out;
+
+	cmd = ntohl(msg.cmd);
+	if (cmd != MSG_ALIST)
+		goto out;
+
+	type = TRACECMD_MSG_MNG_LIST;
+ out:
+	return type;
+}
+
+int tracecmd_msg_send_client(struct tracecmd_msg_handle *msg_handle,
+			     const char *name, int pid)
+{
+	struct tracecmd_msg msg;
+	char *buf;
+	int len;
+	int ret;
+
+	len = strlen(name) + 32;
+	buf = malloc(len);
+	if (!buf)
+		return -ENOMEM;
+	len = sprintf(buf, "%s:%d", name, pid);
+
+	ret = tracecmd_msg_create(msg_handle, MSG_LIST, &msg);
+	if (ret < 0)
+		return ret;
+
+	msg.data.data.size = htonl(len);
+	msg.data.data.buf = buf;
+
+	msg.size = htonl(MIN_DATA_SIZE + len);
+
+	ret = msg_do_write_check(msg_handle, &msg);
+	
+	/* Frees buf */
+	msg_free(&msg);
+
+	return ret;
+}
+
+int tracecmd_msg_finish_clients(struct tracecmd_msg_handle *msg_handle)
+{
+	return tracecmd_msg_send(msg_handle, MSG_FINISH);
 }
 
 static bool process_option(struct tracecmd_msg_handle *msg_handle,
@@ -781,6 +927,13 @@ int tracecmd_msg_initial_setting(struct tracecmd_msg_handle *msg_handle)
 	}
 
 	cmd = ntohl(msg.cmd);
+
+	if (cmd == MSG_CINIT) {
+		/* This is a client agent */
+		msg_handle->flags |= TRACECMD_MSG_FL_AGENT;
+		return tracecmd_msg_send(msg_handle, MSG_CRINIT);
+	}
+
 	if (cmd != MSG_TINIT) {
 		ret = -EINVAL;
 		goto error;

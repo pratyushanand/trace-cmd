@@ -772,6 +772,9 @@ static void __clear_trace(struct buffer_instance *instance)
 	FILE *fp;
 	char *path;
 
+	if (instance->guest)
+		return;
+
 	/* reset the trace */
 	path = get_instance_file(instance, "trace");
 	fp = fopen(path, "w");
@@ -1076,6 +1079,8 @@ static void add_event_pid(const char *buf, int len)
 	int fd;
 
 	for_all_instances(instance) {
+		if (instance->guest)
+			continue;
 		fd = open_instance_fd(instance, "set_event_pid", O_WRONLY);
 		write(fd, buf, len);
 		close(fd);
@@ -1098,6 +1103,8 @@ static void add_new_filter_pid(int pid)
 	common_pid_filter = append_pid_filter(common_pid_filter, "common_pid", pid);
 
 	for_all_instances(instance) {
+		if (instance->guest)
+			continue;
 		update_sched_events(instance, pid);
 		update_event_filters(instance);
 	}
@@ -1241,6 +1248,9 @@ set_plugin_instance(struct buffer_instance *instance, const char *name)
 	char *path;
 	char zero = '0';
 
+	if (instance->guest)
+		return;
+
 	path = get_instance_file(instance, "current_tracer");
 	fp = fopen(path, "w");
 	if (!fp) {
@@ -1336,6 +1346,9 @@ static void disable_func_stack_trace_instance(struct buffer_instance *instance)
 	char *cond;
 	int size;
 	int ret;
+
+	if (instance->guest)
+		return;
 
 	path = get_instance_file(instance, "current_tracer");
 	ret = stat(path, &st);
@@ -1529,6 +1542,9 @@ reset_events_instance(struct buffer_instance *instance)
 	int fd;
 	int i;
 	int ret;
+
+	if (instance->guest)
+		return;
 
 	if (use_old_event_method()) {
 		/* old way only had top instance */
@@ -1881,6 +1897,9 @@ static void write_tracing_on(struct buffer_instance *instance, int on)
 	int ret;
 	int fd;
 
+	if (instance->guest)
+		return;
+
 	fd = open_tracing_on(instance);
 	if (fd < 0)
 		return;
@@ -2070,6 +2089,9 @@ static void update_pid_filters(struct buffer_instance *instance)
 
 static void update_pid_event_filters(struct buffer_instance *instance)
 {
+	if (instance->guest)
+		return;
+
 	if (have_set_event_pid)
 		return update_pid_filters(instance);
 	/*
@@ -2403,6 +2425,9 @@ static void expand_event_instance(struct buffer_instance *instance)
 {
 	struct event_list *compressed_list = instance->events;
 	struct event_list *event;
+
+	if (instance->guest)
+		return;
 
 	reset_event_list(instance);
 
@@ -2867,14 +2892,16 @@ static struct tracecmd_msg_handle *setup_virtio(void)
 	return communicate_with_listener_virt(fd);
 }
 
-static struct tracecmd_msg_handle *setup_connection(void)
+static struct tracecmd_msg_handle *
+setup_connection(struct tracecmd_msg_handle *msg_handle)
 {
-	struct tracecmd_msg_handle *msg_handle;
-
-	if (host)
-		msg_handle = setup_network();
-	else
-		msg_handle = setup_virtio();
+	/* An agent already has a connection set up */
+	if (!msg_handle) {
+		if (host)
+			msg_handle = setup_network();
+		else
+			msg_handle = setup_virtio();
+	}
 
 	/* Now create the handle through this socket */
 	if (msg_handle->version == V2_PROTOCOL) {
@@ -2899,17 +2926,17 @@ static void finish_network(struct tracecmd_msg_handle *msg_handle)
 }
 
 static struct tracecmd_msg_handle *
-start_threads(enum trace_type type, int global)
+start_threads(enum trace_type type, int global,
+	      struct tracecmd_msg_handle *msg_handle)
 {
 	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	struct buffer_instance *instance;
-	struct tracecmd_msg_handle *msg_handle = NULL;
 	int *brass = NULL;
 	int i = 0;
 	int ret;
 
 	if (host || virt ) {
-		msg_handle = setup_connection();
+		msg_handle = setup_connection(msg_handle);
 		if (!msg_handle)
 			die("Failed to make connection");
 	}
@@ -3717,6 +3744,9 @@ static void make_instances(void)
 	int ret;
 
 	for_each_instance(instance) {
+		if (instance->guest) {
+			continue;
+		}
 		path = get_instance_dir(instance);
 		ret = stat(path, &st);
 		if (ret < 0) {
@@ -3738,7 +3768,7 @@ static void remove_instances(void)
 
 	for_each_instance(instance) {
 		/* Only delete what we created */
-		if (instance->keep)
+		if (instance->keep || instance->guest)
 			continue;
 		if (instance->tracing_on_fd > 0) {
 			close(instance->tracing_on_fd);
@@ -4187,6 +4217,7 @@ void update_first_instance(struct buffer_instance *instance, int topt)
 }
 
 enum {
+	OPT_guest		= 245,
 	OPT_virt		= 246,
 	OPT_debug		= 247,
 	OPT_max_graph_depth	= 248,
@@ -4199,7 +4230,7 @@ enum {
 	OPT_date		= 255,
 };
 
-void trace_record (int argc, char **argv)
+void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle)
 {
 	const char *plugin = NULL;
 	const char *output = NULL;
@@ -4207,7 +4238,6 @@ void trace_record (int argc, char **argv)
 	struct event_list *event = NULL;
 	struct event_list *last_event = NULL;
 	struct buffer_instance *instance = &top_instance;
-	struct tracecmd_msg_handle *msg_handle = NULL;
 	enum trace_type type = 0;
 	char *pids;
 	char *pid;
@@ -4223,6 +4253,7 @@ void trace_record (int argc, char **argv)
 	int profile = 0;
 	int global = 0;
 	int start = 0;
+	int guest = 0;
 	int run_command = 0;
 	int neg_event = 0;
 	int date = 0;
@@ -4400,6 +4431,7 @@ void trace_record (int argc, char **argv)
 			{"ts-offset", required_argument, NULL, OPT_tsoffset},
 			{"max-graph-depth", required_argument, NULL, OPT_max_graph_depth},
 			{"virt", no_argument, NULL, OPT_virt},
+			{"guest", required_argument, NULL, OPT_guest},
 			{"debug", no_argument, NULL, OPT_debug},
 			{"help", no_argument, NULL, '?'},
 			{NULL, 0, NULL, 0}
@@ -4676,6 +4708,8 @@ void trace_record (int argc, char **argv)
 				die("Could not allocate option");
 			break;
 		case OPT_virt:
+			if (guest)
+				die("Can not use --guest with --virt");
 			if (!record)
 				die("--virt only available with record");
 			if (host)
@@ -4685,6 +4719,17 @@ void trace_record (int argc, char **argv)
 			if (use_tcp)
 				die("--virt incompatible with -t");
 			virt = true;
+			break;
+		case OPT_guest:
+			if (virt)
+				die("Can not use --guest with --virt");
+
+			guest = 1;
+			instance = create_instance(optarg);
+			if (!instance)
+				die("Failed to create guest");
+			instance->guest = 1;
+			add_instance(instance);
 			break;
 		case OPT_debug:
 			debug = 1;
@@ -4810,7 +4855,7 @@ void trace_record (int argc, char **argv)
 	if (type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM)) {
 		signal(SIGINT, finish);
 		if (!latency)
-			msg_handle = start_threads(type, global);
+			msg_handle = start_threads(type, global, msg_handle);
 	}
 
 	if (extract) {
