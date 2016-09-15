@@ -404,6 +404,8 @@ static void fork_reader(int sfd, const char *node, const char *port,
 		pdie("creating reader");
 
 	if (!*pid) {
+		unlink_sock = 0;
+
 		if (mode == NET)
 			ret = process_udp_child(sfd, node, port, cpu, pagesize, use_tcp);
 		else if (mode == VIRT)
