@@ -99,7 +99,7 @@ static int do_ptrace;
 static int filter_task;
 static int filter_pid = -1;
 
-static int cpu_count;
+static int local_cpu_count;
 
 static int finished;
 
@@ -285,13 +285,14 @@ static void reset_save_file_cond(const char *file, int prio,
  * add_instance - add a buffer instance to the internal list
  * @instance: The buffer instance to add
  */
-void add_instance(struct buffer_instance *instance)
+void add_instance(struct buffer_instance *instance, int cpu_count)
 {
 	init_instance(instance);
 	instance->next = buffer_instances;
 	if (first_instance == buffer_instances)
 		first_instance = instance;
 	buffer_instances = instance;
+	instance->cpu_count = cpu_count;
 	buffers++;
 }
 
@@ -391,7 +392,7 @@ static int __add_all_instances(const char *tracing_dir)
 		instance = create_instance(name);
 		if (!instance)
 			die("Failed to create instance");
-		add_instance(instance);
+		add_instance(instance, local_cpu_count);
 	}
 
 	closedir(dir);
@@ -521,7 +522,7 @@ static int kill_thread_instance(int start, struct buffer_instance *instance)
 	int n = start;
 	int i;
 
-	for (i = 0; i < cpu_count; i++) {
+	for (i = 0; i < instance->cpu_count; i++) {
 		if (pids[n].pid > 0) {
 			kill(pids[n].pid, SIGKILL);
 			delete_temp_file(instance, i);
@@ -572,7 +573,7 @@ static int delete_thread_instance(int start, struct buffer_instance *instance)
 	int n = start;
 	int i;
 
-	for (i = 0; i < cpu_count; i++) {
+	for (i = 0; i < instance->cpu_count; i++) {
 		if (pids) {
 			if (pids[n].pid) {
 				delete_temp_file(instance, i);
@@ -599,7 +600,7 @@ static void delete_thread_data(void)
 	 * isn't used.
 	 */
 	if (no_top_instance()) {
-		for (i = 0; i < cpu_count; i++)
+		for (i = 0; i < local_cpu_count; i++)
 			delete_temp_file(&top_instance, i);
 	}
 }
@@ -611,7 +612,7 @@ static void stop_threads(enum trace_type type)
 	int ret;
 	int i;
 
-	if (!cpu_count)
+	if (!recorder_threads)
 		return;
 
 	/* Tell all threads to finish up */
@@ -646,11 +647,8 @@ static void flush_threads(struct tracecmd_msg_handle *msg_handle)
 	long ret;
 	int i;
 
-	if (!cpu_count)
-		return;
-
 	for_all_instances(instance) {
-		for (i = 0; i < cpu_count; i++) {
+		for (i = 0; i < instance->cpu_count; i++) {
 			/* Extract doesn't support sub buffers yet */
 			ret = create_recorder(instance, msg_handle, i,
 					      TRACE_TYPE_EXTRACT, NULL);
@@ -2120,8 +2118,8 @@ static void set_mask(struct buffer_instance *instance)
 
 	if (strcmp(mask, "-1") == 0) {
 		/* set all CPUs */
-		int bytes = (cpu_count + 7) / 8;
-		int last = cpu_count % 8;
+		int bytes = (instance->cpu_count + 7) / 8;
+		int last = instance->cpu_count % 8;
 		int i;
 
 		if (bytes > 4095) {
@@ -2630,7 +2628,7 @@ static int create_recorder(struct buffer_instance *instance,
 			set_prio(rt_prio);
 
 		/* do not kill tasks on error */
-		cpu_count = 0;
+		instance->cpu_count = 0;
 	}
 
 	if (msg_handle) {
@@ -2685,7 +2683,7 @@ static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_han
 	check_first_msg_from_server(msg_handle);
 
 	/* write the number of CPUs we have (in ASCII) */
-	sprintf(buf, "%d", cpu_count);
+	sprintf(buf, "%d", local_cpu_count);
 
 	/* include \0 */
 	write(msg_handle->fd, buf, strlen(buf)+1);
@@ -2719,15 +2717,15 @@ static void communicate_with_listener_v1_net(struct tracecmd_msg_handle *msg_han
 		/* No options */
 		write(msg_handle->fd, "0", 2);
 
-	client_ports = tracecmd_msg_alloc_client_ports(msg_handle, cpu_count);
+	client_ports = tracecmd_msg_alloc_client_ports(msg_handle, local_cpu_count);
 	if (!client_ports)
-		die("Failed to allocate client ports for %d cpus", cpu_count);
+		die("Failed to allocate client ports for %d cpus", local_cpu_count);
 
 	/*
 	 * Now we will receive back a comma deliminated list
 	 * of client ports to connect to.
 	 */
-	for (cpu = 0; cpu < cpu_count; cpu++) {
+	for (cpu = 0; cpu < local_cpu_count; cpu++) {
 		for (i = 0; i < BUFSIZ; i++) {
 			n = read(msg_handle->fd, buf+i, 1);
 			if (n != 1)
@@ -2797,7 +2795,7 @@ communicate_with_listener_virt(int fd)
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
-	msg_handle->cpu_count = cpu_count;
+	msg_handle->cpu_count = local_cpu_count;
 	msg_handle->version = V2_PROTOCOL;
 
 	if (tracecmd_msg_connect_to_server(msg_handle) < 0)
@@ -2860,7 +2858,7 @@ again:
 	if (!msg_handle)
 		die("Failed to allocate message handle");
 
-	msg_handle->cpu_count = cpu_count;
+	msg_handle->cpu_count = local_cpu_count;
 	msg_handle->version = V2_PROTOCOL;
 
 	if (use_tcp)
@@ -2932,6 +2930,7 @@ start_threads(enum trace_type type, int global,
 	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	struct buffer_instance *instance;
 	int *brass = NULL;
+	int total_cpu_count = 0;
 	int i = 0;
 	int ret;
 
@@ -2941,23 +2940,27 @@ start_threads(enum trace_type type, int global,
 			die("Failed to make connection");
 	}
 
-	/* make a thread for every CPU we have */
-	pids = malloc(sizeof(*pids) * cpu_count * (buffers + 1));
-	if (!pids)
-		die("Failed to allocat pids for %d cpus", cpu_count);
+	for_all_instances(instance)
+		total_cpu_count += instance->cpu_count;
 
-	memset(pids, 0, sizeof(*pids) * cpu_count * (buffers + 1));
+	/* make a thread for every CPU we have */
+	pids = malloc(sizeof(*pids) * total_cpu_count * (buffers + 1));
+	if (!pids)
+		die("Failed to allocat pids for %d cpus", total_cpu_count);
+
+	memset(pids, 0, sizeof(*pids) * total_cpu_count * (buffers + 1));
 
 	for_all_instances(instance) {
 		int x, pid;
-		for (x = 0; x < cpu_count; x++) {
+		for (x = 0; x < instance->cpu_count; x++) {
 			if (type & TRACE_TYPE_STREAM) {
 				brass = pids[i].brass;
 				ret = pipe(brass);
 				if (ret < 0)
 					die("pipe");
 				pids[i].stream = trace_stream_init(instance, x,
-								   brass[0], cpu_count,
+								   brass[0],
+								   instance->cpu_count,
 								   profile, hooks,
 								   global);
 				if (!pids[i].stream)
@@ -2987,12 +2990,13 @@ static void append_buffer(struct tracecmd_output *handle,
 {
 	int i;
 
-	for (i = 0; i < cpu_count; i++)
+	for (i = 0; i < instance->cpu_count; i++)
 		temp_files[i] = get_temp_file(instance, i);
 
-	tracecmd_append_buffer_cpu_data(handle, buffer_option, cpu_count, temp_files);
+	tracecmd_append_buffer_cpu_data(handle, buffer_option,
+					instance->cpu_count, temp_files);
 
-	for (i = 0; i < cpu_count; i++)
+	for (i = 0; i < instance->cpu_count; i++)
 		put_temp_file(temp_files[i]);
 }
 
@@ -3008,7 +3012,7 @@ add_buffer_stat(struct tracecmd_output *handle, struct buffer_instance *instance
 			    s.len+1, s.buffer);
 	trace_seq_destroy(&s);
 
-	for (i = 0; i < cpu_count; i++)
+	for (i = 0; i < instance->cpu_count; i++)
 		tracecmd_add_option(handle, TRACECMD_OPTION_CPUSTAT,
 				    instance->s_save[i].len+1,
 				    instance->s_save[i].buffer);
@@ -3065,7 +3069,7 @@ static void print_stat(struct buffer_instance *instance)
 	if (!is_top_instance(instance))
 		printf("\nBuffer: %s\n\n", instance->name);
 
-	for (cpu = 0; cpu < cpu_count; cpu++)
+	for (cpu = 0; cpu < instance->cpu_count; cpu++)
 		trace_seq_do_printf(&instance->s_print[cpu]);
 }
 
@@ -3081,6 +3085,7 @@ static void record_data(char *date2ts, int flags,
 	struct tracecmd_option **buffer_options;
 	struct tracecmd_output *handle;
 	struct buffer_instance *instance;
+	int max_cpu_count = local_cpu_count;
 	char **temp_files;
 	int i;
 
@@ -3090,16 +3095,22 @@ static void record_data(char *date2ts, int flags,
 	}
 
 	if (latency)
-		handle = tracecmd_create_file_latency(output_file, cpu_count);
+		handle = tracecmd_create_file_latency(output_file, local_cpu_count);
 	else {
-		if (!cpu_count)
+		if (!local_cpu_count)
 			return;
 
-		temp_files = malloc(sizeof(*temp_files) * cpu_count);
-		if (!temp_files)
-			die("Failed to allocate temp_files for %d cpus", cpu_count);
+		/* Allocate enough temp files to handle each instance */
+		for_all_instances(instance)
+			if (instance->cpu_count > max_cpu_count)
+				max_cpu_count = instance->cpu_count;
 
-		for (i = 0; i < cpu_count; i++)
+		temp_files = malloc(sizeof(*temp_files) * max_cpu_count);
+		if (!temp_files)
+			die("Failed to allocate temp_files for %d cpus",
+			    local_cpu_count);
+
+		for (i = 0; i < max_cpu_count; i++)
 			temp_files[i] = get_temp_file(&top_instance, i);
 
 		/*
@@ -3107,7 +3118,7 @@ static void record_data(char *date2ts, int flags,
 		 * empty trace.dat files for it.
 		 */
 		if (no_top_instance()) {
-			for (i = 0; i < cpu_count; i++)
+			for (i = 0; i < local_cpu_count; i++)
 				touch_file(temp_files[i]);
 		}
 
@@ -3132,7 +3143,7 @@ static void record_data(char *date2ts, int flags,
 		if (!no_top_instance()) {
 			struct trace_seq *s = top_instance.s_save;
 
-			for (i = 0; i < cpu_count; i++)
+			for (i = 0; i < local_cpu_count; i++)
 				tracecmd_add_option(handle, TRACECMD_OPTION_CPUSTAT,
 						    s[i].len+1, s[i].buffer);
 		}
@@ -3158,9 +3169,9 @@ static void record_data(char *date2ts, int flags,
 		if (!no_top_instance())
 			print_stat(&top_instance);
 
-		tracecmd_append_cpu_data(handle, cpu_count, temp_files);
+		tracecmd_append_cpu_data(handle, local_cpu_count, temp_files);
 
-		for (i = 0; i < cpu_count; i++)
+		for (i = 0; i < max_cpu_count; i++)
 			put_temp_file(temp_files[i]);
 
 		if (buffers) {
@@ -3896,8 +3907,8 @@ static void allocate_seq(void)
 	struct buffer_instance *instance;
 
 	for_all_instances(instance) {
-		instance->s_save = malloc(sizeof(struct trace_seq) * cpu_count);
-		instance->s_print = malloc(sizeof(struct trace_seq) * cpu_count);
+		instance->s_save = malloc(sizeof(struct trace_seq) * instance->cpu_count);
+		instance->s_print = malloc(sizeof(struct trace_seq) * instance->cpu_count);
 		if (!instance->s_save || !instance->s_print)
 			die("Failed to allocate instance info");
 	}
@@ -3952,7 +3963,7 @@ static void record_stats(void)
 	for_all_instances(instance) {
 		s_save = instance->s_save;
 		s_print = instance->s_print;
-		for (cpu = 0; cpu < cpu_count; cpu++) {
+		for (cpu = 0; cpu < instance->cpu_count; cpu++) {
 			trace_seq_init(&s_save[cpu]);
 			trace_seq_init(&s_print[cpu]);
 			trace_seq_printf(&s_save[cpu], "CPU: %d\n", cpu);
@@ -3976,7 +3987,7 @@ static void destroy_stats(void)
 	int cpu;
 
 	for_all_instances(instance) {
-		for (cpu = 0; cpu < cpu_count; cpu++) {
+		for (cpu = 0; cpu < instance->cpu_count; cpu++) {
 			trace_seq_destroy(&instance->s_save[cpu]);
 			trace_seq_destroy(&instance->s_print[cpu]);
 		}
@@ -4267,7 +4278,9 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 
 	init_instance(instance);
 
-	cpu_count = count_cpus();
+	local_cpu_count = count_cpus();
+
+	instance->cpu_count = local_cpu_count;
 
 	if ((record = (strcmp(argv[1], "record") == 0)))
 		; /* do nothing */
@@ -4295,7 +4308,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				instance = create_instance(optarg);
 				if (!instance)
 					die("Failed to create instance");
-				add_instance(instance);
+				add_instance(instance, local_cpu_count);
 				break;
 			case 'a':
 				add_all_instances();
@@ -4328,7 +4341,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				instance = create_instance(optarg);
 				if (!instance)
 					die("Failed to create instance");
-				add_instance(instance);
+				add_instance(instance, local_cpu_count);
 				break;
 			case 'a':
 				add_all_instances();
@@ -4377,7 +4390,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				instance = create_instance(optarg);
 				if (!instance)
 					die("Failed to create instance");
-				add_instance(instance);
+				add_instance(instance, local_cpu_count);
 				/* -d will remove keep */
 				instance->keep = 1;
 				break;
@@ -4658,7 +4671,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 			instance = create_instance(optarg);
 			if (!instance)
 				die("Failed to create instance");
-			add_instance(instance);
+			add_instance(instance, local_cpu_count);
 			if (profile)
 				instance->profile = 1;
 			break;
@@ -4729,7 +4742,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 			if (!instance)
 				die("Failed to create guest");
 			instance->guest = 1;
-			add_instance(instance);
+			add_instance(instance, local_cpu_count);
 			break;
 		case OPT_debug:
 			debug = 1;
