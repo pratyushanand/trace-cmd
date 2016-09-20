@@ -169,6 +169,7 @@ struct buffer_instance {
 	struct func_list	*notrace_funcs;
 
 	const char		*clock;
+	char			*host;
 
 	struct trace_seq	*s_save;
 	struct trace_seq	*s_print;

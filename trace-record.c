@@ -84,7 +84,6 @@ static int buffers;
 /* Clear all function filters */
 static int clear_function_filters;
 
-static char *host;
 static int sfd;
 static struct tracecmd_output *network_handle;
 
@@ -2500,7 +2499,7 @@ static void flush(int sig)
 		tracecmd_stop_recording(recorder);
 }
 
-static void connect_port(int *client_ports, int cpu)
+static void connect_port(const char *host, int *client_ports, int cpu)
 {
 	struct addrinfo hints;
 	struct addrinfo *results, *rp;
@@ -2630,7 +2629,7 @@ static int create_recorder(struct buffer_instance *instance,
 		char *path;
 
 		if (!(instance->flags & BUFFER_FL_VIRT))
-			connect_port(client_ports, cpu);
+			connect_port(instance->host, client_ports, cpu);
 		path = get_instance_dir(instance);
 		recorder = tracecmd_create_buffer_recorder_fd(client_ports[cpu],
 							      cpu, recorder_flags,
@@ -2802,11 +2801,12 @@ communicate_with_listener_virt(int fd)
 	return msg_handle;
 }
 
-static struct tracecmd_msg_handle *setup_network(void)
+static struct tracecmd_msg_handle *setup_network(struct buffer_instance *instance)
 {
 	struct tracecmd_msg_handle *msg_handle;
 	struct addrinfo hints;
 	struct addrinfo *result, *rp;
+	char *host = instance->host;
 	int sfd, s;
 	char *server;
 	char *port;
@@ -2824,6 +2824,7 @@ static struct tracecmd_msg_handle *setup_network(void)
 			die("alloctating server");
 		server = strtok_r(host, ":", &p);
 		port = strtok_r(NULL, ":", &p);
+		instance->host = host;
 	}
 
 	memset(&hints, 0, sizeof(hints));
@@ -2889,12 +2890,14 @@ static struct tracecmd_msg_handle *setup_virtio(void)
 }
 
 static struct tracecmd_msg_handle *
-setup_connection(struct tracecmd_msg_handle *msg_handle)
+setup_connection(struct buffer_instance *instance)
 {
+	struct tracecmd_msg_handle *msg_handle = instance->msg_handle;
+
 	/* An agent already has a connection set up */
 	if (!msg_handle) {
-		if (host)
-			msg_handle = setup_network();
+		if (instance->host)
+			msg_handle = setup_network(instance);
 		else
 			msg_handle = setup_virtio();
 	}
@@ -2913,12 +2916,14 @@ setup_connection(struct tracecmd_msg_handle *msg_handle)
 	return msg_handle;
 }
 
-static void finish_network(struct tracecmd_msg_handle *msg_handle)
+static void finish_network(struct buffer_instance *instance)
 {
+	struct tracecmd_msg_handle *msg_handle = instance->msg_handle;
+
 	if (msg_handle->version == V2_PROTOCOL)
 		tracecmd_msg_send_close_msg(msg_handle);
 	tracecmd_msg_handle_close(msg_handle);
-	free(host);
+	free(instance->host);
 }
 
 void start_threads(enum trace_type type, int global)
@@ -2943,8 +2948,8 @@ void start_threads(enum trace_type type, int global)
 	for_all_instances(instance) {
 		int x, pid;
 
-		if (host || (instance->flags & BUFFER_FL_VIRT)) {
-			instance->msg_handle = setup_connection(instance->msg_handle);
+		if (instance->host || (instance->flags & BUFFER_FL_VIRT)) {
+			instance->msg_handle = setup_connection(instance);
 			if (!instance->msg_handle)
 				die("Failed to make connection");
 		}
@@ -3109,7 +3114,7 @@ static void record_data(char *date2ts, int flags)
 
 	for_all_instances(instance) {
 		if (instance->msg_handle)
-			finish_network(instance->msg_handle);
+			finish_network(instance);
 		else
 			local = true;
 	}
@@ -3914,7 +3919,7 @@ update_plugin_instance(struct buffer_instance *instance,
 	    strcmp(plugin, "wakeup") == 0 ||
 	    strcmp(plugin, "wakeup_rt") == 0) {
 		latency = 1;
-		if (host)
+		if (instance->host)
 			die("Network tracing not available with latency tracer plugins");
 		if (type & TRACE_TYPE_STREAM)
 			die("Streaming is not available with latency tracer plugins");
@@ -4288,6 +4293,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	struct buffer_instance *instance = &top_instance;
 	enum trace_type type = 0;
 	bool virt = false;
+	bool host = false;
 	char *pids;
 	char *pid;
 	char *sav;
@@ -4683,7 +4689,8 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				die("-N incompatible with --virt");
 			if (output)
 				die("-N incompatible with -o");
-			host = optarg;
+			instance->host = optarg;
+			host = true;
 			break;
 		case 'm':
 			if (max_kb)
