@@ -85,7 +85,6 @@ static int buffers;
 static int clear_function_filters;
 
 static int sfd;
-static struct tracecmd_output *network_handle;
 
 /* Max size to let a per cpu file get */
 static int max_kb;
@@ -2893,6 +2892,7 @@ static struct tracecmd_msg_handle *
 setup_connection(struct buffer_instance *instance)
 {
 	struct tracecmd_msg_handle *msg_handle = instance->msg_handle;
+	struct tracecmd_output *network_handle;
 
 	/* An agent already has a connection set up */
 	if (!msg_handle) {
@@ -2911,6 +2911,8 @@ setup_connection(struct buffer_instance *instance)
 	} else
 		network_handle = tracecmd_create_init_fd_glob(msg_handle->fd,
 							      listed_events);
+
+	instance->network_handle = network_handle;
 
 	/* OK, we are all set, let'r rip! */
 	return msg_handle;
@@ -4992,10 +4994,10 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	for_all_instances(instance) {
 		if (instance->flags & BUFFER_FL_KEEP)
 			write_tracing_on(instance, instance->tracing_on_init_val);
-	}
 
-	if (host || virt)
-		tracecmd_output_close(network_handle);
+		if (instance->network_handle)
+			tracecmd_output_close(instance->network_handle);
+	}
 
 	if (profile)
 		trace_profile();
