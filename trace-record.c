@@ -638,10 +638,9 @@ static void stop_threads(enum trace_type type)
 }
 
 static int create_recorder(struct buffer_instance *instance,
-			   struct tracecmd_msg_handle *msg_handle, int cpu,
-			   enum trace_type type, int *brass);
+			   int cpu, enum trace_type type, int *brass);
 
-static void flush_threads(struct tracecmd_msg_handle *msg_handle)
+static void flush_threads(void)
 {
 	struct buffer_instance *instance;
 	long ret;
@@ -650,7 +649,7 @@ static void flush_threads(struct tracecmd_msg_handle *msg_handle)
 	for_all_instances(instance) {
 		for (i = 0; i < instance->cpu_count; i++) {
 			/* Extract doesn't support sub buffers yet */
-			ret = create_recorder(instance, msg_handle, i,
+			ret = create_recorder(instance, i,
 					      TRACE_TYPE_EXTRACT, NULL);
 			if (ret < 0)
 				die("error reading ring buffer");
@@ -2603,9 +2602,9 @@ create_recorder_instance(struct buffer_instance *instance, const char *file, int
  * connections and exit as the tracing is serialized by a single thread.
  */
 static int create_recorder(struct buffer_instance *instance,
-			   struct tracecmd_msg_handle *msg_handle, int cpu,
-			   enum trace_type type, int *brass)
+			   int cpu, enum trace_type type, int *brass)
 {
+	struct tracecmd_msg_handle *msg_handle = instance->msg_handle;
 	long ret;
 	char *file;
 	int pid;
@@ -2923,9 +2922,7 @@ static void finish_network(struct tracecmd_msg_handle *msg_handle)
 	free(host);
 }
 
-static struct tracecmd_msg_handle *
-start_threads(enum trace_type type, int global,
-	      struct tracecmd_msg_handle *msg_handle)
+void start_threads(enum trace_type type, int global)
 {
 	int profile = (type & TRACE_TYPE_PROFILE) == TRACE_TYPE_PROFILE;
 	struct buffer_instance *instance;
@@ -2933,12 +2930,6 @@ start_threads(enum trace_type type, int global,
 	int total_cpu_count = 0;
 	int i = 0;
 	int ret;
-
-	if (host || virt ) {
-		msg_handle = setup_connection(msg_handle);
-		if (!msg_handle)
-			die("Failed to make connection");
-	}
 
 	for_all_instances(instance)
 		total_cpu_count += instance->cpu_count;
@@ -2952,6 +2943,13 @@ start_threads(enum trace_type type, int global,
 
 	for_all_instances(instance) {
 		int x, pid;
+
+		if (host || virt) {
+			instance->msg_handle = setup_connection(instance->msg_handle);
+			if (!instance->msg_handle)
+				die("Failed to make connection");
+		}
+
 		for (x = 0; x < instance->cpu_count; x++) {
 			if (type & TRACE_TYPE_STREAM) {
 				brass = pids[i].brass;
@@ -2971,7 +2969,7 @@ start_threads(enum trace_type type, int global,
 			pids[i].instance = instance;
 			/* Make sure all output is flushed before forking */
 			fflush(stdout);
-			pid = pids[i++].pid = create_recorder(instance, msg_handle,
+			pid = pids[i++].pid = create_recorder(instance,
 							      x, type, brass);
 			if (brass)
 				close(brass[1]);
@@ -2980,7 +2978,6 @@ start_threads(enum trace_type type, int global,
 		}
 	}
 	recorder_threads = i;
-	return msg_handle;
 }
 
 static void touch_file(const char *file)
@@ -3101,20 +3098,25 @@ enum {
 	DATA_FL_OFFSET		= 2,
 };
 
-static void record_data(char *date2ts, int flags,
-			struct tracecmd_msg_handle *msg_handle)
+static void record_data(char *date2ts, int flags)
 {
 	struct tracecmd_option **buffer_options;
 	struct tracecmd_output *handle;
 	struct buffer_instance *instance;
+	bool local = false;
 	int max_cpu_count = local_cpu_count;
 	char **temp_files;
 	int i;
 
-	if (msg_handle) {
-		finish_network(msg_handle);
-		return;
+	for_all_instances(instance) {
+		if (instance->msg_handle)
+			finish_network(instance->msg_handle);
+		else
+			local = true;
 	}
+
+	if (!local)
+		return;
 
 	if (latency)
 		handle = tracecmd_create_file_latency(output_file, local_cpu_count);
@@ -3123,9 +3125,12 @@ static void record_data(char *date2ts, int flags,
 			return;
 
 		/* Allocate enough temp files to handle each instance */
-		for_all_instances(instance)
+		for_all_instances(instance) {
+			if (instance->msg_handle)
+				continue;
 			if (instance->cpu_count > max_cpu_count)
 				max_cpu_count = instance->cpu_count;
+		}
 
 		temp_files = malloc(sizeof(*temp_files) * max_cpu_count);
 		if (!temp_files)
@@ -3139,7 +3144,7 @@ static void record_data(char *date2ts, int flags,
 		 * If top_instance was not used, we still need to create
 		 * empty trace.dat files for it.
 		 */
-		if (no_top_instance()) {
+		if (no_top_instance() || top_instance.msg_handle) {
 			for (i = 0; i < local_cpu_count; i++)
 				touch_file(temp_files[i]);
 		}
@@ -3162,7 +3167,7 @@ static void record_data(char *date2ts, int flags,
 		}
 
 		/* Only record the top instance under TRACECMD_OPTION_CPUSTAT*/
-		if (!no_top_instance()) {
+		if (!no_top_instance() && !top_instance.msg_handle) {
 			struct trace_seq *s = top_instance.s_save;
 
 			for (i = 0; i < local_cpu_count; i++)
@@ -3186,6 +3191,9 @@ static void record_data(char *date2ts, int flags,
 				int cpus = instance->cpu_count != local_cpu_count ?
 					instance->cpu_count : 0;
 
+				if (instance->msg_handle)
+					continue;
+
 				buffer_options[i++] = tracecmd_add_buffer_option(handle,
 										 instance->name,
 										 cpus);
@@ -3193,7 +3201,7 @@ static void record_data(char *date2ts, int flags,
 			}
 		}
 
-		if (!no_top_instance())
+		if (!no_top_instance() && !top_instance.msg_handle)
 			print_stat(&top_instance);
 
 		tracecmd_append_cpu_data(handle, local_cpu_count, temp_files);
@@ -3204,6 +3212,8 @@ static void record_data(char *date2ts, int flags,
 		if (buffers) {
 			i = 0;
 			for_each_instance(instance) {
+				if (instance->msg_handle)
+					continue;
 				print_stat(instance);
 				append_buffer(handle, buffer_options[i++], instance, temp_files);
 			}
@@ -4308,6 +4318,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	local_cpu_count = count_cpus();
 
 	instance->cpu_count = local_cpu_count;
+	instance->msg_handle = msg_handle;
 
 	if ((record = (strcmp(argv[1], "record") == 0)))
 		; /* do nothing */
@@ -4895,11 +4906,11 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	if (type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM)) {
 		signal(SIGINT, finish);
 		if (!latency)
-			msg_handle = start_threads(type, global, msg_handle);
+			start_threads(type, global);
 	}
 
 	if (extract) {
-		flush_threads(msg_handle);
+		flush_threads();
 
 	} else {
 		if (!(type & (TRACE_TYPE_RECORD | TRACE_TYPE_STREAM))) {
@@ -4943,7 +4954,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	}
 
 	if (record || extract) {
-		record_data(date2ts, data_flags, msg_handle);
+		record_data(date2ts, data_flags);
 		delete_thread_data();
 	} else
 		print_stats();
