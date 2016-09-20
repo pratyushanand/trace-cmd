@@ -91,7 +91,6 @@ static struct tracecmd_output *network_handle;
 /* Max size to let a per cpu file get */
 static int max_kb;
 
-static bool virt;
 static bool use_tcp;
 
 static int do_ptrace;
@@ -2630,7 +2629,7 @@ static int create_recorder(struct buffer_instance *instance,
 		int *client_ports = tracecmd_msg_get_client_ports(msg_handle);
 		char *path;
 
-		if (!virt)
+		if (!(instance->flags & BUFFER_FL_VIRT))
 			connect_port(client_ports, cpu);
 		path = get_instance_dir(instance);
 		recorder = tracecmd_create_buffer_recorder_fd(client_ports[cpu],
@@ -2944,7 +2943,7 @@ void start_threads(enum trace_type type, int global)
 	for_all_instances(instance) {
 		int x, pid;
 
-		if (host || virt) {
+		if (host || (instance->flags & BUFFER_FL_VIRT)) {
 			instance->msg_handle = setup_connection(instance->msg_handle);
 			if (!instance->msg_handle)
 				die("Failed to make connection");
@@ -4288,6 +4287,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	struct event_list *last_event = NULL;
 	struct buffer_instance *instance = &top_instance;
 	enum trace_type type = 0;
+	bool virt = false;
 	char *pids;
 	char *pid;
 	char *sav;
@@ -4771,6 +4771,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 			if (use_tcp)
 				die("--virt incompatible with -t");
 			virt = true;
+			instance->flags |= BUFFER_FL_VIRT;
 			break;
 		case OPT_guest:
 			if (virt)
@@ -4821,6 +4822,12 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 		if (!buffer_instances)
 			die("No instances reference??");
 		first_instance = buffer_instances;
+		/*
+		 * If only one instance was instantiated and --virt
+		 * was specified, then make it the virt instance.
+		 */
+		if (virt && !first_instance->next)
+			first_instance->flags |= BUFFER_FL_VIRT;
 	} else
 		topt = 1;
 
