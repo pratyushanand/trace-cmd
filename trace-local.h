@@ -141,6 +141,12 @@ char *strstrip(char *str);
 
 /* --- instance manipulation --- */
 
+enum buffer_instance_flags {
+	BUFFER_FL_KEEP		= 1 << 0,
+	BUFFER_FL_PROFILE	= 1 << 1,
+	BUFFER_FL_GUEST		= 1 << 2,
+};
+
 struct func_list {
 	struct func_list *next;
 	const char *func;
@@ -170,13 +176,11 @@ struct buffer_instance {
 
 	struct tracecmd_msg_handle *msg_handle;
 
+	int			flags;
 	int			tracing_on_init_val;
 	int			tracing_on_fd;
-	int			keep;
 	int			buffer_size;
-	int			profile;
 	int			cpu_count;
-	int			guest;
 };
 
 extern struct buffer_instance top_instance;

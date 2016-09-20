@@ -175,7 +175,7 @@ static struct reset_file *reset_files;
 /* Triggers need to be cleared in a special way */
 static struct reset_file *reset_triggers;
 
-struct buffer_instance top_instance = { .keep = 1 };
+struct buffer_instance top_instance = { .flags = BUFFER_FL_KEEP };
 struct buffer_instance *buffer_instances;
 struct buffer_instance *first_instance;
 
@@ -769,7 +769,7 @@ static void __clear_trace(struct buffer_instance *instance)
 	FILE *fp;
 	char *path;
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	/* reset the trace */
@@ -1076,7 +1076,7 @@ static void add_event_pid(const char *buf, int len)
 	int fd;
 
 	for_all_instances(instance) {
-		if (instance->guest)
+		if (instance->flags & BUFFER_FL_GUEST)
 			continue;
 		fd = open_instance_fd(instance, "set_event_pid", O_WRONLY);
 		write(fd, buf, len);
@@ -1100,7 +1100,7 @@ static void add_new_filter_pid(int pid)
 	common_pid_filter = append_pid_filter(common_pid_filter, "common_pid", pid);
 
 	for_all_instances(instance) {
-		if (instance->guest)
+		if (instance->flags & BUFFER_FL_GUEST)
 			continue;
 		update_sched_events(instance, pid);
 		update_event_filters(instance);
@@ -1245,7 +1245,7 @@ set_plugin_instance(struct buffer_instance *instance, const char *name)
 	char *path;
 	char zero = '0';
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	path = get_instance_file(instance, "current_tracer");
@@ -1344,7 +1344,7 @@ static void disable_func_stack_trace_instance(struct buffer_instance *instance)
 	int size;
 	int ret;
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	path = get_instance_file(instance, "current_tracer");
@@ -1540,7 +1540,7 @@ reset_events_instance(struct buffer_instance *instance)
 	int i;
 	int ret;
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	if (use_old_event_method()) {
@@ -1894,7 +1894,7 @@ static void write_tracing_on(struct buffer_instance *instance, int on)
 	int ret;
 	int fd;
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	fd = open_tracing_on(instance);
@@ -2086,7 +2086,7 @@ static void update_pid_filters(struct buffer_instance *instance)
 
 static void update_pid_event_filters(struct buffer_instance *instance)
 {
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	if (have_set_event_pid)
@@ -2423,7 +2423,7 @@ static void expand_event_instance(struct buffer_instance *instance)
 	struct event_list *compressed_list = instance->events;
 	struct event_list *event;
 
-	if (instance->guest)
+	if (instance->flags & BUFFER_FL_GUEST)
 		return;
 
 	reset_event_list(instance);
@@ -3792,7 +3792,7 @@ static void make_instances(void)
 	int ret;
 
 	for_each_instance(instance) {
-		if (instance->guest) {
+		if (instance->flags & BUFFER_FL_GUEST) {
 			continue;
 		}
 		path = get_instance_dir(instance);
@@ -3803,7 +3803,7 @@ static void make_instances(void)
 				die("mkdir %s", path);
 		} else
 			/* Don't delete instances that already exist */
-			instance->keep = 1;
+			instance->flags |= BUFFER_FL_KEEP;
 		tracecmd_put_tracing_file(path);
 	}
 }
@@ -3816,7 +3816,7 @@ static void remove_instances(void)
 
 	for_each_instance(instance) {
 		/* Only delete what we created */
-		if (instance->keep || instance->guest)
+		if (instance->flags & (BUFFER_FL_KEEP | BUFFER_FL_GUEST))
 			continue;
 		if (instance->tracing_on_fd > 0) {
 			close(instance->tracing_on_fd);
@@ -3878,7 +3878,8 @@ static void check_function_plugin(void)
 
 static int __check_doing_something(struct buffer_instance *instance)
 {
-	return instance->profile || instance->plugin || instance->events;
+	return (instance->flags & BUFFER_FL_PROFILE) ||
+		instance->plugin || instance->events;
 }
 
 static void check_doing_something(void)
@@ -4430,7 +4431,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 					die("Failed to create instance");
 				add_instance(instance, local_cpu_count);
 				/* -d will remove keep */
-				instance->keep = 1;
+				instance->flags |= BUFFER_FL_KEEP;
 				break;
 			case 't':
 				/* Force to use top instance */
@@ -4442,18 +4443,18 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				last_specified_all = 1;
 				add_all_instances();
 				for_each_instance(instance) {
-					instance->keep = 1;
+					instance->flags |= BUFFER_FL_KEEP;
 				}
 				break;
 			case 'd':
 				if (last_specified_all) {
 					for_each_instance(inst) {
-						inst->keep = 0;
+						inst->flags &= ~BUFFER_FL_KEEP;
 					}
 				} else {
 					if (is_top_instance(instance))
 						die("Can not delete top level buffer");
-					instance->keep = 0;
+					instance->flags &= ~BUFFER_FL_KEEP;
 				}
 				break;
 			}
@@ -4711,7 +4712,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 				die("Failed to create instance");
 			add_instance(instance, local_cpu_count);
 			if (profile)
-				instance->profile = 1;
+				instance->flags |= BUFFER_FL_PROFILE;
 			break;
 		case 'k':
 			keep = 1;
@@ -4732,7 +4733,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 			recorder_flags |= TRACECMD_RECORD_NOSPLICE;
 			break;
 		case OPT_profile:
-			instance->profile = 1;
+			instance->flags |= BUFFER_FL_PROFILE;
 			events = 1;
 			break;
 		case OPT_stderr:
@@ -4779,7 +4780,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 			instance = create_instance(optarg);
 			if (!instance)
 				die("Failed to create guest");
-			instance->guest = 1;
+			instance->flags |= BUFFER_FL_GUEST;
 			add_instance(instance, local_cpu_count);
 			break;
 		case OPT_debug:
@@ -4810,7 +4811,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	 * then enable profiling on the top instance.
 	 */
 	if (profile && !buffer_instances)
-		top_instance.profile = 1;
+		top_instance.flags = BUFFER_FL_PROFILE;
 
 	/*
 	 * If top_instance doesn't have any plugins or events, then
@@ -4835,7 +4836,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 	/* Save the state of tracing_on before starting */
 	for_all_instances(instance) {
 
-		if (!manual && instance->profile)
+		if (!manual && instance->flags & BUFFER_FL_PROFILE)
 			enable_profile(instance);
 
 		instance->tracing_on_init_val = read_tracing_on(instance);
@@ -4975,7 +4976,7 @@ void trace_record (int argc, char **argv, struct tracecmd_msg_handle *msg_handle
 
 	/* If tracing_on was enabled before we started, set it on now */
 	for_all_instances(instance) {
-		if (instance->keep)
+		if (instance->flags & BUFFER_FL_KEEP)
 			write_tracing_on(instance, instance->tracing_on_init_val);
 	}
 
