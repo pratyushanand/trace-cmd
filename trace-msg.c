@@ -49,7 +49,7 @@ typedef __be32 be32;
 #define MSG_DATA_LEN			(MSG_MAX_LEN - MSG_HDR_LEN)
 
 					/* - header size for error msg */
-#define MSG_META_MAX_LEN		(MSG_MAX_LEN - MIN_META_SIZE)
+#define MSG_META_MAX_LEN		(MSG_MAX_LEN - MIN_DATA_SIZE)
 
 
 #define MIN_TINIT_SIZE		offsetof(struct tracecmd_msg, data.tinit.opt)
@@ -57,9 +57,7 @@ typedef __be32 be32;
 /* Not really the minimum, but I couldn't think of a better name */
 #define MIN_RINIT_SIZE		offsetof(struct tracecmd_msg, data.rinit.port_array)
 
-#define MIN_META_SIZE	 	offsetof(struct tracecmd_msg, data.meta.buf)
-
-#define MIN_RCONNECT_SIZE 	offsetof(struct tracecmd_msg, data.rconnect.buf)
+#define MIN_DATA_SIZE	 	offsetof(struct tracecmd_msg, data.data.buf)
 
 /* use CONNECTION_MSG as a protocol version of trace-msg */
 #define MSG_VERSION		"V2"
@@ -80,11 +78,6 @@ bool send_metadata;
 static int *port_array;
 bool done;
 
-struct tracecmd_msg_rconnect {
-	be32 size;
-	void *buf;
-} __attribute__((packed));
-
 struct tracecmd_msg_opt {
 	be32 size;
 	be32 opt_cmd;
@@ -102,7 +95,7 @@ struct tracecmd_msg_rinit {
 	be32 *port_array;
 } __attribute__((packed));
 
-struct tracecmd_msg_meta {
+struct tracecmd_msg_data {
 	be32 size;
 	void *buf;
 } __attribute__((packed));
@@ -111,10 +104,9 @@ struct tracecmd_msg_error {
 	be32 size;
 	be32 cmd;
 	union {
-		struct tracecmd_msg_rconnect rconnect;
 		struct tracecmd_msg_tinit tinit;
 		struct tracecmd_msg_rinit rinit;
-		struct tracecmd_msg_meta meta;
+		struct tracecmd_msg_data data;
 	} data;
 } __attribute__((packed));
 
@@ -133,10 +125,9 @@ struct tracecmd_msg {
 	be32 size;
 	be32 cmd;
 	union {
-		struct tracecmd_msg_rconnect rconnect;
 		struct tracecmd_msg_tinit tinit;
 		struct tracecmd_msg_rinit rinit;
-		struct tracecmd_msg_meta meta;
+		struct tracecmd_msg_data data;
 		struct tracecmd_msg_error err;
 	} data;
 } __attribute__((packed));
@@ -167,10 +158,8 @@ static ssize_t msg_do_write_check(int fd, struct tracecmd_msg *msg)
 		ret = msg_write(fd, msg, MIN_RINIT_SIZE, msg->data.rinit.port_array);
 		break;
 	case MSG_SENDMETA:
-		ret = msg_write(fd, msg, MIN_META_SIZE, msg->data.meta.buf);
-		break;
 	case MSG_RCONNECT:
-		ret = msg_write(fd, msg, MIN_RCONNECT_SIZE, msg->data.rconnect.buf);
+		ret = msg_write(fd, msg, MIN_DATA_SIZE, msg->data.data.buf);
 		break;
 	default:
 		ret = __do_write_check(fd, msg, ntohl(msg->size));
@@ -179,15 +168,15 @@ static ssize_t msg_do_write_check(int fd, struct tracecmd_msg *msg)
 	return ret;
 }
 
-static int make_rconnect(const char *buf, int buflen, struct tracecmd_msg *msg)
+static int make_data(const char *buf, int buflen, struct tracecmd_msg *msg)
 {
-	msg->data.rconnect.size = htonl(buflen);
-	msg->data.rconnect.buf = malloc(buflen);
-	if (!msg->data.rconnect.buf)
+	msg->data.data.size = htonl(buflen);
+	msg->data.data.buf = malloc(buflen);
+	if (!msg->data.data.buf)
 		return -ENOMEM;
-	memcpy(msg->data.rconnect.buf, buf, buflen);
+	memcpy(msg->data.data.buf, buf, buflen);
 
-	msg->size = htonl(MIN_RCONNECT_SIZE + buflen);
+	msg->size = htonl(MIN_DATA_SIZE + buflen);
 
 	return 0;
 }
@@ -262,7 +251,7 @@ static int tracecmd_msg_create(u32 cmd, struct tracecmd_msg *msg)
 
 	switch (cmd) {
 	case MSG_RCONNECT:
-		return make_rconnect(CONNECTION_MSG, CONNECTION_MSGSIZE, msg);
+		return make_data(CONNECTION_MSG, CONNECTION_MSGSIZE, msg);
 	case MSG_TINIT:
 		return make_tinit(msg);
 	case MSG_RINIT:
@@ -288,10 +277,8 @@ static void msg_free(struct tracecmd_msg *msg)
 		free(msg->data.rinit.port_array);
 		break;
 	case MSG_SENDMETA:
-		free(msg->data.meta.buf);
-		break;
 	case MSG_RCONNECT:
-		free(msg->data.rconnect.buf);
+		free(msg->data.data.buf);
 		break;
 	}
 }
@@ -387,11 +374,9 @@ static int tracecmd_msg_read_extra(int fd, struct tracecmd_msg *msg, int *n)
 		return msg_read_extra(fd, msg, n, size, MIN_RINIT_SIZE,
 				      (void **)&msg->data.rinit.port_array);
 	case MSG_SENDMETA:
-		return msg_read_extra(fd, msg, n, size, MIN_META_SIZE,
-				      (void **)&msg->data.meta.buf);
 	case MSG_RCONNECT:
-		return msg_read_extra(fd, msg, n, size, MIN_RCONNECT_SIZE,
-				      (void **)&msg->data.rconnect.buf);
+		return msg_read_extra(fd, msg, n, size, MIN_DATA_SIZE,
+				      (void **)&msg->data.data.buf);
 	}
 
 	return msg_read(fd, msg, size - MSG_HDR_LEN, n);
@@ -464,8 +449,8 @@ static int tracecmd_msg_wait_for_msg(int fd, struct tracecmd_msg *msg)
 	switch (cmd) {
 	case MSG_RCONNECT:
 		/* Make sure the server is the tracecmd server */
-		if (memcmp(msg->data.rconnect.buf, CONNECTION_MSG,
-			   ntohl(msg->data.rconnect.size) - 1) != 0) {
+		if (memcmp(msg->data.data.buf, CONNECTION_MSG,
+			   ntohl(msg->data.data.size) - 1) != 0) {
 			warning("server not tracecmd server");
 			return -EPROTONOSUPPORT;
 		}
@@ -686,23 +671,23 @@ int tracecmd_msg_metadata_send(int fd, const char *buf, int size)
 	if (ret < 0)
 		return ret;
 
-	msg.data.meta.buf = malloc(MSG_META_MAX_LEN);
-	if (!msg.data.meta.buf)
+	msg.data.data.buf = malloc(MSG_META_MAX_LEN);
+	if (!msg.data.data.buf)
 		return -ENOMEM;
 
-	msg.data.meta.size = htonl(MSG_META_MAX_LEN);
-	msg.size = htonl(MIN_META_SIZE + MSG_META_MAX_LEN);
+	msg.data.data.size = htonl(MSG_META_MAX_LEN);
+	msg.size = htonl(MIN_DATA_SIZE + MSG_META_MAX_LEN);
 
 	n = size;
 	do {
 		if (n > MSG_META_MAX_LEN) {
-			memcpy(msg.data.meta.buf, buf+count, MSG_META_MAX_LEN);
+			memcpy(msg.data.data.buf, buf+count, MSG_META_MAX_LEN);
 			n -= MSG_META_MAX_LEN;
 			count += MSG_META_MAX_LEN;
 		} else {
-			msg.size = htonl(MIN_META_SIZE + n);
-			msg.data.meta.size = htonl(n);
-			memcpy(msg.data.meta.buf, buf+count, n);
+			msg.size = htonl(MIN_DATA_SIZE + n);
+			msg.data.data.size = htonl(n);
+			memcpy(msg.data.data.buf, buf+count, n);
 			n = 0;
 		}
 		ret = msg_do_write_check(fd, &msg);
@@ -750,11 +735,11 @@ int tracecmd_msg_collect_metadata(int ifd, int ofd)
 		} else if (cmd != MSG_SENDMETA)
 			goto error;
 
-		n = ntohl(msg.data.meta.size);
+		n = ntohl(msg.data.data.size);
 		t = n;
 		s = 0;
 		do {
-			s = write(ofd, msg.data.meta.buf+s, t);
+			s = write(ofd, msg.data.data.buf+s, t);
 			if (s < 0) {
 				if (errno == EINTR)
 					continue;
