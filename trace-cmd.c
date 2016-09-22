@@ -708,7 +708,7 @@ int main (int argc, char **argv)
 					break;
 				default:
 					fprintf(stderr, "list: invalid option -- '%c'\n",
-						argv[optind][1]);
+						argv[i][1]);
 					usage(argv);
 				}
 			}
