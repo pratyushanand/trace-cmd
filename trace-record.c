@@ -3323,7 +3323,7 @@ static char *read_instance_file(struct buffer_instance *instance, char *file, in
 	return buf;
 }
 
-static char *read_file(char *file, int *psize)
+char *read_file(char *file, int *psize)
 {
 	return read_instance_file(&top_instance, file, psize);
 }

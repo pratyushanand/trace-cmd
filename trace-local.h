@@ -74,6 +74,8 @@ void trace_mem(int argc, char **argv);
 
 void trace_stat(int argc, char **argv);
 
+void trace_top(int argc, char **argv);
+
 struct hook_list;
 
 int trace_profile_record(struct tracecmd_input *handle,
@@ -184,5 +186,6 @@ void update_first_instance(struct buffer_instance *instance, int topt);
 
 void show_instance_file(struct buffer_instance *instance, const char *name);
 int count_cpus(void);
+char *read_file(char *file, int *psize);
 
 #endif /* __TRACE_LOCAL_H */

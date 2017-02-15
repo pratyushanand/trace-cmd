@@ -196,6 +196,14 @@ static struct usage_help usage_help[] = {
 		" %s stat"
 	},
 	{
+		"top",
+		"shows peak memory usage statistics of task and kernel module",
+		" %s top [-s socket] [-e socket] [-p socket]\n"
+		"          -s start capture statistics at given socket\n"
+		"          -e end capture statistics for given socket\n"
+		"          -p print statistics on console from given socket\n"
+	},
+	{
 		"split",
 		"parse a trace.dat file into smaller file(s)",
 		" %s split [options] -o file [start [end]]\n"

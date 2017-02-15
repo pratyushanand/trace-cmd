@@ -495,6 +495,10 @@ int main (int argc, char **argv)
 		trace_stat(argc, argv);
 		exit(0);
 
+	} else if (strcmp(argv[1], "top") == 0) {
+		trace_top(argc, argv);
+		exit(0);
+
 	} else if (strcmp(argv[1], "options") == 0) {
 		show_plugin_options();
 		exit(0);
